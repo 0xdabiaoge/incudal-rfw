@@ -171,8 +171,14 @@ sudo bash rfw-test-deploy.sh
 
 - 默认只对中国来源 `CN` 生效。
 - 默认启用端口访问/拦截统计。
-- 默认启用推荐阻断规则：邮件、HTTP、SOCKS、TCP-FET 严格、WireGuard、HY2、TUIC、UDP-FET、VLESS TCP、VMess TCP。
+- 默认启用推荐阻断规则：邮件、HTTP、SOCKS、SS/TCP-FET 严格、WireGuard、HY2、TUIC、SS UDP/UDP-FET、VLESS TCP、VMess TCP。
 - `QUIC 总开关` 和 `全入站阻断` 默认不开，需要你在规则开关里手动开启。
+
+SS / Shadowsocks 说明：
+
+- SS TCP 没有单独按钮，主要由 `SS/TCP-FET 严格` 这条规则覆盖。
+- SS UDP 没有单独按钮，主要由 `SS UDP/UDP-FET` 这条规则覆盖。
+- `SOCKS 代理` 指的是 SOCKS4/SOCKS5 协议本身，不等同于 Shadowsocks。
 
 规则开关支持批量输入：
 

@@ -61,13 +61,13 @@ RULE_NAMES=(
     "邮件防滥用"
     "明文 HTTP"
     "SOCKS 代理"
-    "TCP-FET 严格"
-    "TCP-FET 宽松"
+    "SS/TCP-FET 严格"
+    "SS/TCP-FET 宽松"
     "WireGuard"
     "QUIC 总开关"
     "Hysteria2 / HY2"
     "TUIC"
-    "UDP-FET"
+    "SS UDP/UDP-FET"
     "VLESS TCP"
     "VMess TCP"
     "全入站阻断"
@@ -77,13 +77,13 @@ RULE_DESCS=(
     "阻断 SMTP 常用端口，防止发信滥用"
     "阻断明文 HTTP 入站请求"
     "阻断 SOCKS4 / SOCKS4a / SOCKS5"
-    "严格阻断高熵 TCP 加密流量，拦截力度更强"
-    "宽松检测高熵 TCP 加密流量，误伤更低"
+    "覆盖 Shadowsocks/SS、VMess/raw TCP 等高熵 TCP 加密流量"
+    "宽松检测 Shadowsocks/SS 等高熵 TCP 流量，误伤更低"
     "阻断 WireGuard UDP 握手"
     "粗暴阻断可识别 QUIC，HY2/TUIC/HTTP3 会一起受影响"
     "尽力阻断 HY2、混淆 HY2 和明显 UDP 滥用"
     "尽力阻断 TUIC 和非 Web 端口 QUIC 代理"
-    "阻断 UDP 高熵加密 payload"
+    "覆盖 Shadowsocks/SS UDP、混淆 UDP 等高熵加密 payload"
     "阻断裸 VLESS over TCP"
     "阻断裸 VMess over TCP"
     "危险规则：阻断匹配来源的全部入站流量"
@@ -138,7 +138,7 @@ Incudal-RFW 正式部署脚本 v${SCRIPT_VERSION}
 
 默认策略：
   默认只对中国来源 CN 生效，并启用端口访问/拦截统计。
-  默认规则：邮件、HTTP、SOCKS、TCP-FET 严格、WG、HY2、TUIC、UDP-FET、VLESS TCP、VMess TCP。
+  默认规则：邮件、HTTP、SOCKS、SS/TCP-FET 严格、WG、HY2、TUIC、SS UDP/UDP-FET、VLESS TCP、VMess TCP。
 
 部署参数：
   --iface <网卡名>             指定挂载 XDP 的网卡
@@ -410,7 +410,7 @@ flag_from_rule_token() {
 sanitize_rule_conflicts() {
     if has_word "$SELECTED_RULES" "--block-fet-strict" && has_word "$SELECTED_RULES" "--block-fet-loose"; then
         SELECTED_RULES=$(remove_word "$SELECTED_RULES" "--block-fet-loose")
-        warn "TCP-FET 严格和宽松不能同时开启，已保留严格模式。"
+        warn "SS/TCP-FET 严格和宽松不能同时开启，已保留严格模式。"
     fi
 }
 
