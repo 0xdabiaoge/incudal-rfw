@@ -117,6 +117,7 @@ const HTTP_PATCH: u32 = 0x50415443; // "PATC" (PATCH 的前4字节)
 const HTTP_CONNECT: u32 = 0x434f4e4e; // "CONN" (CONNECT 的前4字节)
 
 // SOCKS 版本号
+const SOCKS4_VERSION: u8 = 0x04;
 const SOCKS5_VERSION: u8 = 0x05;
 
 // UDP 头部
@@ -144,6 +145,11 @@ const RULE_BLOCK_QUIC: u32 = 1 << 7;
 const RULE_GEOIP_ENABLED: u32 = 1 << 8; // 启用 GeoIP 国家过滤
 const RULE_GEOIP_WHITELIST: u32 = 1 << 9; // GeoIP 白名单模式
 const RULE_LOG_PORT_ACCESS: u32 = 1 << 10; // 记录端口访问日志
+const RULE_BLOCK_HYSTERIA2: u32 = 1 << 11;
+const RULE_BLOCK_TUIC: u32 = 1 << 12;
+const RULE_BLOCK_UDP_FET: u32 = 1 << 13;
+const RULE_BLOCK_VLESS_TCP: u32 = 1 << 14;
+const RULE_BLOCK_VMESS_TCP: u32 = 1 << 15;
 
 // WireGuard 协议常量
 const WG_TYPE_HANDSHAKE_INIT: u8 = 1;
@@ -243,14 +249,14 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
             // 检查 Email 屏蔽规则（阻止所有 SMTP 流量）
             if (*config_flags & RULE_BLOCK_EMAIL) != 0 {
                 // 封禁所有 SMTP 相关端口，无论方向
-                if dst_port == 25 || dst_port == 587 || dst_port == 465 || dst_port == 2525 {
+                if is_smtp_port(dst_port) {
                     if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
                         log_port_access(src_ip, dst_port, IPPROTO_TCP, true);
                     }
                     info!(&ctx, "BLOCKED: SMTP 流量被阻止, 目标端口: {}", dst_port);
                     return Ok(xdp_action::XDP_DROP);
                 }
-                if src_port == 25 || src_port == 587 || src_port == 465 || src_port == 2525 {
+                if is_smtp_port(src_port) {
                     if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
                         log_port_access(src_ip, dst_port, IPPROTO_TCP, true);
                     }
@@ -265,7 +271,9 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
                 & (RULE_BLOCK_HTTP
                     | RULE_BLOCK_SOCKS5
                     | RULE_BLOCK_FET_STRICT
-                    | RULE_BLOCK_FET_LOOSE))
+                    | RULE_BLOCK_FET_LOOSE
+                    | RULE_BLOCK_VLESS_TCP
+                    | RULE_BLOCK_VMESS_TCP))
                 != 0;
 
             unsafe {
@@ -382,6 +390,46 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
                                 }
                             }
 
+                            if !should_block
+                                && (*config_flags & RULE_BLOCK_VLESS_TCP) != 0
+                                && payload_size >= 24
+                            {
+                                if is_vless_tcp_request(&ctx, payload_offset)? {
+                                    info!(
+                                        &ctx,
+                                        "BLOCKED: VLESS TCP 入站流量, 源 {:i}:{} -> 目标端口 {}",
+                                        u32::from_be(src_ip),
+                                        src_port,
+                                        dst_port
+                                    );
+                                    should_block = true;
+                                }
+                            }
+
+                            if !should_block
+                                && (*config_flags & RULE_BLOCK_VMESS_TCP) != 0
+                                && payload_size >= 16
+                            {
+                                if is_fully_encrypted_traffic(
+                                    &ctx,
+                                    payload_offset,
+                                    payload_size,
+                                    true,
+                                    src_ip,
+                                    src_port,
+                                    dst_port,
+                                )? {
+                                    info!(
+                                        &ctx,
+                                        "BLOCKED: VMess TCP/全加密弱协议入站, 源 {:i}:{} -> 目标端口 {}",
+                                        u32::from_be(src_ip),
+                                        src_port,
+                                        dst_port
+                                    );
+                                    should_block = true;
+                                }
+                            }
+
                             // 检查 FET（全加密流量）入站屏蔽规则
                             // FET 检测需要至少 16 字节
                             if !should_block && payload_size >= 16 {
@@ -413,6 +461,14 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
                                     }
                                 }
                             }
+                            let fet_enabled = (*config_flags
+                                & (RULE_BLOCK_FET_STRICT
+                                    | RULE_BLOCK_FET_LOOSE
+                                    | RULE_BLOCK_VMESS_TCP))
+                                != 0;
+                            if !should_block && fet_enabled && payload_size < 16 {
+                                return Ok(xdp_action::XDP_PASS);
+                            }
                             // 放过小包等后续大包再检查
                             if payload_size <= 6 {
                                 return Ok(xdp_action::XDP_PASS);
@@ -440,28 +496,30 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
         IPPROTO_UDP => {
             // 处理 UDP 协议
             let udp_hdr = ptr_at::<UdpHdr>(&ctx, size_of::<EthHdr>() + ip_hdr_len)?;
+            let src_port = u16::from_be(unsafe { (*udp_hdr).source });
+            let dst_port = u16::from_be(unsafe { (*udp_hdr).dest });
 
             // UDP payload 的起始位置
             let payload_offset = size_of::<EthHdr>() + ip_hdr_len + size_of::<UdpHdr>();
+            let start = ctx.data();
+            let end = ctx.data_end();
+            let payload_size = end.saturating_sub(start + payload_offset);
+
+            let should_check_udp = if (*config_flags & RULE_GEOIP_ENABLED) != 0 {
+                let in_geoip_list = is_geoip_match(src_ip)?;
+                let whitelist_mode = (*config_flags & RULE_GEOIP_WHITELIST) != 0;
+                if whitelist_mode {
+                    !in_geoip_list
+                } else {
+                    in_geoip_list
+                }
+            } else {
+                true
+            };
 
             // 检查 WireGuard 入站屏蔽规则
             if (*config_flags & RULE_BLOCK_WIREGUARD) != 0 {
-                // 先检查 GeoIP 过滤（如果启用）
-                let should_check_wg = if (*config_flags & RULE_GEOIP_ENABLED) != 0 {
-                    let in_geoip_list = is_geoip_match(src_ip)?;
-                    let whitelist_mode = (*config_flags & RULE_GEOIP_WHITELIST) != 0;
-                    if whitelist_mode {
-                        !in_geoip_list
-                    } else {
-                        in_geoip_list
-                    }
-                } else {
-                    true // 未启用 GeoIP,检测所有流量
-                };
-
-                if should_check_wg && is_wireguard_packet(&ctx, payload_offset)? {
-                    let src_port = u16::from_be(unsafe { (*udp_hdr).source });
-                    let dst_port = u16::from_be(unsafe { (*udp_hdr).dest });
+                if should_check_udp && is_wireguard_packet(&ctx, payload_offset)? {
                     if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
                         log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
                     }
@@ -476,24 +534,109 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
                 }
             }
 
-            // 检查 QUIC 入站屏蔽规则
-            if (*config_flags & RULE_BLOCK_QUIC) != 0 {
-                // 先检查 GeoIP 过滤（如果启用）
-                let should_check_quic = if (*config_flags & RULE_GEOIP_ENABLED) != 0 {
-                    let in_geoip_list = is_geoip_match(src_ip)?;
-                    let whitelist_mode = (*config_flags & RULE_GEOIP_WHITELIST) != 0;
-                    if whitelist_mode {
-                        !in_geoip_list
-                    } else {
-                        in_geoip_list
-                    }
+            if should_check_udp {
+                let proxy_quic = if ((*config_flags
+                    & (RULE_BLOCK_HYSTERIA2 | RULE_BLOCK_TUIC | RULE_BLOCK_QUIC))
+                    != 0)
+                {
+                    is_quic_packet(&ctx, payload_offset)?
                 } else {
-                    true // 未启用 GeoIP,检测所有流量
+                    false
                 };
 
-                if should_check_quic && is_quic_packet(&ctx, payload_offset)? {
-                    let src_port = u16::from_be(unsafe { (*udp_hdr).source });
-                    let dst_port = u16::from_be(unsafe { (*udp_hdr).dest });
+                let proxy_quic_non_web = proxy_quic && !is_common_web_quic_port(dst_port);
+
+                let udp_fet_enabled =
+                    (*config_flags & (RULE_BLOCK_HYSTERIA2 | RULE_BLOCK_UDP_FET)) != 0;
+                let udp_fet_match = if udp_fet_enabled && payload_size >= 16 {
+                    is_fully_encrypted_traffic(
+                        &ctx,
+                        payload_offset,
+                        payload_size,
+                        true,
+                        src_ip,
+                        src_port,
+                        dst_port,
+                    )?
+                } else {
+                    false
+                };
+
+                if (*config_flags & RULE_BLOCK_HYSTERIA2) != 0 && udp_fet_match {
+                    if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
+                        log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
+                    }
+                    info!(
+                        &ctx,
+                        "BLOCKED: Hysteria2/HY2 obfs UDP 入站, 源 {:i}:{} -> 目标端口 {}",
+                        u32::from_be(src_ip),
+                        src_port,
+                        dst_port
+                    );
+                    return Ok(xdp_action::XDP_DROP);
+                }
+
+                if (*config_flags & (RULE_BLOCK_HYSTERIA2 | RULE_BLOCK_TUIC))
+                    == (RULE_BLOCK_HYSTERIA2 | RULE_BLOCK_TUIC)
+                    && proxy_quic_non_web
+                {
+                    if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
+                        log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
+                    }
+                    info!(
+                        &ctx,
+                        "BLOCKED: HY2/TUIC QUIC proxy 入站, 源 {:i}:{} -> 目标端口 {}",
+                        u32::from_be(src_ip),
+                        src_port,
+                        dst_port
+                    );
+                    return Ok(xdp_action::XDP_DROP);
+                }
+
+                if (*config_flags & RULE_BLOCK_TUIC) != 0 && proxy_quic_non_web {
+                    if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
+                        log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
+                    }
+                    info!(
+                        &ctx,
+                        "BLOCKED: TUIC/QUIC proxy 入站, 源 {:i}:{} -> 目标端口 {}",
+                        u32::from_be(src_ip),
+                        src_port,
+                        dst_port
+                    );
+                    return Ok(xdp_action::XDP_DROP);
+                }
+
+                if (*config_flags & RULE_BLOCK_HYSTERIA2) != 0 && proxy_quic_non_web {
+                    if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
+                        log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
+                    }
+                    info!(
+                        &ctx,
+                        "BLOCKED: Hysteria2/HY2 QUIC proxy 入站, 源 {:i}:{} -> 目标端口 {}",
+                        u32::from_be(src_ip),
+                        src_port,
+                        dst_port
+                    );
+                    return Ok(xdp_action::XDP_DROP);
+                }
+
+                if (*config_flags & RULE_BLOCK_UDP_FET) != 0 && udp_fet_match {
+                    if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
+                        log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
+                    }
+                    info!(
+                        &ctx,
+                        "BLOCKED: UDP 全加密流量(FET) 入站, 源 {:i}:{} -> 目标端口 {}",
+                        u32::from_be(src_ip),
+                        src_port,
+                        dst_port
+                    );
+                    return Ok(xdp_action::XDP_DROP);
+                }
+
+                // 检查 QUIC 入站屏蔽规则：粗暴阻断所有可识别 QUIC。
+                if (*config_flags & RULE_BLOCK_QUIC) != 0 && proxy_quic {
                     if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
                         log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
                     }
@@ -512,6 +655,16 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
     }
 
     Ok(xdp_action::XDP_PASS)
+}
+
+#[inline(always)]
+fn is_smtp_port(port: u16) -> bool {
+    port == 25 || port == 26 || port == 465 || port == 587 || port == 2525
+}
+
+#[inline(always)]
+fn is_common_web_quic_port(port: u16) -> bool {
+    port == 443 || port == 4433 || port == 8443
 }
 
 // 检测是否为 TLS 流量
@@ -566,9 +719,9 @@ fn is_http_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> 
     Ok(false)
 }
 
-// 检测是否为 SOCKS5 请求
+// 检测是否为 SOCKS 代理请求
 // SOCKS5 握手格式：VER (1 byte) | NMETHODS (1 byte) | METHODS (1-255 bytes)
-// VER = 0x05
+// SOCKS4/4a 请求格式：VER (1 byte) | CMD (1 byte) | DSTPORT | DSTIP | USERID
 fn is_socks5_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
     // 尝试读取前2个字节
     let socks_header = match ptr_at::<[u8; 2]>(ctx, payload_offset) {
@@ -576,7 +729,22 @@ fn is_socks5_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()
         Err(_) => return Ok(false), // payload 太小
     };
 
-    // 检查版本号
+    if socks_header[0] == SOCKS4_VERSION {
+        let command = socks_header[1];
+        if command != 0x01 && command != 0x02 {
+            return Ok(false);
+        }
+
+        let req = match ptr_at::<[u8; 8]>(ctx, payload_offset) {
+            Ok(ptr) => unsafe { *ptr },
+            Err(_) => return Ok(false),
+        };
+
+        let dst_port_nonzero = req[2] != 0 || req[3] != 0;
+        let dst_ip_nonzero = req[4] != 0 || req[5] != 0 || req[6] != 0 || req[7] != 0;
+        return Ok(dst_port_nonzero && dst_ip_nonzero);
+    }
+
     if socks_header[0] != SOCKS5_VERSION {
         return Ok(false);
     }
@@ -594,6 +762,68 @@ fn is_socks5_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
+}
+
+// 检测裸 VLESS over TCP 初始请求。
+// 典型格式：VER | UUID(16) | ADDON_LEN | CMD | PORT | ADDR_TYPE | ADDR...
+// 这里重点覆盖常见 addon_len=0 的纯 TCP/UDP/Mux 请求。
+#[inline(always)]
+fn is_vless_tcp_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
+    let req = match ptr_at::<[u8; 24]>(ctx, payload_offset) {
+        Ok(ptr) => unsafe { *ptr },
+        Err(_) => return Ok(false),
+    };
+
+    let version = req[0];
+    if version > 1 {
+        return Ok(false);
+    }
+
+    let uuid_nonzero = req[1] != 0
+        || req[2] != 0
+        || req[3] != 0
+        || req[4] != 0
+        || req[5] != 0
+        || req[6] != 0
+        || req[7] != 0
+        || req[8] != 0
+        || req[9] != 0
+        || req[10] != 0
+        || req[11] != 0
+        || req[12] != 0
+        || req[13] != 0
+        || req[14] != 0
+        || req[15] != 0
+        || req[16] != 0;
+    if !uuid_nonzero {
+        return Ok(false);
+    }
+
+    let addon_len = req[17];
+    if addon_len != 0 {
+        return Ok(false);
+    }
+
+    let command = req[18];
+    if command != 0x01 && command != 0x02 && command != 0x03 {
+        return Ok(false);
+    }
+
+    let port_nonzero = req[19] != 0 || req[20] != 0;
+    if !port_nonzero {
+        return Ok(false);
+    }
+
+    let address_type = req[21];
+    if address_type != 0x01 && address_type != 0x02 && address_type != 0x03 {
+        return Ok(false);
+    }
+
+    if address_type == 0x02 && req[22] == 0 {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 // 检查 IP 是否匹配 GeoIP 列表

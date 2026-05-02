@@ -301,19 +301,19 @@ struct RunOpt {
     /// 只允许来自这些国家的流量,阻止其他所有国家
     /// 例如: --allow-only-countries US,JP,KR
     /// 与 --countries 互斥
-    #[clap(long, value_delimiter = ',', conflicts_with = "countries")]
+    #[clap(long, value_delimiter = ',', conflicts_with_all = ["countries", "block_all_from"])]
     allow_only_countries: Vec<String>,
 
     /// 快捷方式: 阻止指定国家的所有入站流量
     ///
     /// 等价于: --countries X --block-all
     /// 例如: --block-all-from CN,RU
-    #[clap(long, value_delimiter = ',', conflicts_with = "countries")]
+    #[clap(long, value_delimiter = ',', conflicts_with_all = ["countries", "allow_only_countries"])]
     block_all_from: Vec<String>,
 
     /// 屏蔽发送邮件流量
     ///
-    /// 仅阻止 SMTP 发送端口: 25, 587 (STARTTLS), 465 (SMTPS), 2525
+    /// 仅阻止 SMTP 发送端口: 25, 26, 587 (STARTTLS), 465 (SMTPS), 2525
     /// 允许接收邮件: POP3 (110, 995), IMAP (143, 993)
     ///
     /// 用途: 防止服务器被滥用发送垃圾邮件
@@ -381,6 +381,36 @@ struct RunOpt {
     #[clap(long)]
     block_quic: bool,
 
+    /// Block Hysteria2/HY2 inbound traffic (best-effort)
+    ///
+    /// Targets standard QUIC proxy traffic on non-web ports and obfuscated UDP high-entropy traffic.
+    #[clap(long)]
+    block_hysteria2: bool,
+
+    /// Block TUIC inbound traffic (best-effort)
+    ///
+    /// Targets standard QUIC proxy traffic, especially non-web QUIC service ports.
+    #[clap(long)]
+    block_tuic: bool,
+
+    /// Block UDP fully encrypted traffic
+    ///
+    /// Generic UDP high-entropy encrypted traffic rule, useful for obfuscated UDP proxy protocols.
+    #[clap(long)]
+    block_udp_fet: bool,
+
+    /// Block raw VLESS over TCP inbound traffic (best-effort)
+    ///
+    /// Targets VLESS without TLS/Reality/WS/gRPC outer transport.
+    #[clap(long)]
+    block_vless_tcp: bool,
+
+    /// Block raw VMess over TCP inbound traffic
+    ///
+    /// Uses TCP encrypted-traffic detection as a dedicated VMess/raw-TCP switch.
+    #[clap(long)]
+    block_vmess_tcp: bool,
+
     /// 屏蔽所有入站流量（不限协议）
     ///
     /// 最激进的规则，直接在 IP 层阻止所有入站连接
@@ -425,13 +455,31 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
     env_logger::init();
 
     // 简化参数处理
-    let (opt_http, opt_socks5, opt_fet_strict, opt_fet_loose, opt_wg, opt_quic, opt_all) = (
+    let (
+        opt_http,
+        opt_socks5,
+        opt_fet_strict,
+        opt_fet_loose,
+        opt_wg,
+        opt_quic,
+        opt_hysteria2,
+        opt_tuic,
+        opt_udp_fet,
+        opt_vless_tcp,
+        opt_vmess_tcp,
+        mut opt_all,
+    ) = (
         opt.block_http,
         opt.block_socks5,
         opt.block_fet_strict,
         opt.block_fet_loose,
         opt.block_wireguard,
         opt.block_quic,
+        opt.block_hysteria2,
+        opt.block_tuic,
+        opt.block_udp_fet,
+        opt.block_vless_tcp,
+        opt.block_vmess_tcp,
         opt.block_all,
     );
 
@@ -441,6 +489,7 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
 
     if !opt.block_all_from.is_empty() {
         target_countries = opt.block_all_from.clone();
+        opt_all = true;
         info!("使用快捷模式: 阻止来自 {:?} 的所有流量", target_countries);
     } else if !opt.allow_only_countries.is_empty() {
         target_countries = opt.allow_only_countries.clone();
@@ -459,6 +508,11 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
         && !opt_fet_loose
         && !opt_wg
         && !opt_quic
+        && !opt_hysteria2
+        && !opt_tuic
+        && !opt_udp_fet
+        && !opt_vless_tcp
+        && !opt_vmess_tcp
         && !opt_all
     {
         println!("警告: 未启用任何防火墙规则，程序将运行但不执行任何过滤操作");
@@ -581,6 +635,56 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
             format!("{:?} 国家", target_countries)
         };
         info!("启用规则: 屏蔽 {} 的 QUIC 入站", scope);
+    }
+
+    if opt_hysteria2 {
+        config_flags |= rfw_common::RULE_BLOCK_HYSTERIA2;
+        let scope = if target_countries.is_empty() {
+            "所有来源".to_string()
+        } else {
+            format!("{:?} 国家", target_countries)
+        };
+        info!("启用规则: 屏蔽 {} 的 Hysteria2/HY2 入站 (best-effort)", scope);
+    }
+
+    if opt_tuic {
+        config_flags |= rfw_common::RULE_BLOCK_TUIC;
+        let scope = if target_countries.is_empty() {
+            "所有来源".to_string()
+        } else {
+            format!("{:?} 国家", target_countries)
+        };
+        info!("启用规则: 屏蔽 {} 的 TUIC 入站 (best-effort)", scope);
+    }
+
+    if opt_udp_fet {
+        config_flags |= rfw_common::RULE_BLOCK_UDP_FET;
+        let scope = if target_countries.is_empty() {
+            "所有来源".to_string()
+        } else {
+            format!("{:?} 国家", target_countries)
+        };
+        info!("启用规则: 屏蔽 {} 的 UDP 高熵加密流量", scope);
+    }
+
+    if opt_vless_tcp {
+        config_flags |= rfw_common::RULE_BLOCK_VLESS_TCP;
+        let scope = if target_countries.is_empty() {
+            "所有来源".to_string()
+        } else {
+            format!("{:?} 国家", target_countries)
+        };
+        info!("启用规则: 屏蔽 {} 的 VLESS TCP 入站 (best-effort)", scope);
+    }
+
+    if opt_vmess_tcp {
+        config_flags |= rfw_common::RULE_BLOCK_VMESS_TCP;
+        let scope = if target_countries.is_empty() {
+            "所有来源".to_string()
+        } else {
+            format!("{:?} 国家", target_countries)
+        };
+        info!("启用规则: 屏蔽 {} 的 VMess TCP 入站", scope);
     }
 
     if opt_all {
