@@ -188,7 +188,9 @@ sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2,tuic,tcp-node
 ```
 
 在交互菜单中也可以输入 `2 3 4`、`2-3-4`、`2-4` 或 `hy2,tuic,tcp-node`。
-自定义阻断规则同样支持批量输入，例如 `1 3 6-11` 或 `all`。
+自定义阻断规则同样支持批量输入，例如 `1 3 6-11`、`mail node` 或 `all`。
+邮件防滥用在自定义规则里是独立选项，也可以直接输入 `mail`、`email` 或 `smtp`。
+快捷组合包括 `safe`、`node`、`tcp`、`udp`、`mail`。
 在任意部署子菜单中输入 `0` 可以返回主菜单，不会继续执行当前部署流程。
 
 可选 profile：

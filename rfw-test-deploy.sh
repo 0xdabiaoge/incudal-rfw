@@ -435,37 +435,75 @@ select_rule_profile() {
 
 manual_rule_name() {
     case "$1" in
-        1) echo "--block-email" ;;
-        2) echo "--block-http" ;;
-        3) echo "--block-socks5" ;;
-        4) echo "--block-fet-strict" ;;
-        5) echo "--block-wireguard" ;;
-        6) echo "--block-quic" ;;
-        7) echo "--block-hysteria2" ;;
-        8) echo "--block-tuic" ;;
-        9) echo "--block-udp-fet" ;;
-        10) echo "--block-vless-tcp" ;;
-        11) echo "--block-vmess-tcp" ;;
+        1|mail|email|smtp) echo "--block-email" ;;
+        2|http|web) echo "--block-http" ;;
+        3|socks|socks5) echo "--block-socks5" ;;
+        4|fet|tcp-fet) echo "--block-fet-strict" ;;
+        5|wg|wireguard) echo "--block-wireguard" ;;
+        6|quic) echo "--block-quic" ;;
+        7|hy2|hysteria2) echo "--block-hysteria2" ;;
+        8|tuic) echo "--block-tuic" ;;
+        9|udp-fet|udpfet) echo "--block-udp-fet" ;;
+        10|vless|vless-tcp) echo "--block-vless-tcp" ;;
+        11|vmess|vmess-tcp) echo "--block-vmess-tcp" ;;
         *) return 1 ;;
     esac
 }
 
 show_manual_rule_menu() {
     section_title "自定义阻断规则"
-    menu_line "1" "Email/SMTP" "阻断发信滥用端口"
-    menu_line "2" "HTTP" "阻断明文 HTTP 入站"
-    menu_line "3" "SOCKS" "阻断 SOCKS4 / SOCKS4a / SOCKS5"
-    menu_line "4" "TCP-FET" "阻断 TCP 全加密高熵流量，覆盖大量弱节点协议"
-    menu_line "5" "WireGuard" "阻断 WireGuard UDP"
-    menu_line "6" "QUIC" "粗暴阻断可识别 QUIC，HY2/TUIC/HTTP3 会一起挡"
-    menu_line "7" "HY2" "尽力阻断 Hysteria2 / 混淆 HY2"
+    menu_line "1" "邮件防滥用 Email/SMTP" "阻断 25/26/465/587/2525，防止发信滥用"
+    menu_line "2" "明文 HTTP 入站" "阻断 GET/POST/HEAD/PUT 等明文 HTTP"
+    menu_line "3" "SOCKS 代理" "阻断 SOCKS4 / SOCKS4a / SOCKS5"
+    menu_line "4" "TCP 高熵加密 FET" "覆盖大量弱节点协议，包括 SS/VMess/raw TCP 等"
+    menu_line "5" "WireGuard VPN" "阻断 WireGuard UDP 握手"
+    menu_line "6" "QUIC 总开关" "粗暴阻断可识别 QUIC，HY2/TUIC/HTTP3 会一起挡"
+    menu_line "7" "Hysteria2 / HY2" "尽力阻断 HY2 / 混淆 HY2 / UDP 滥用"
     menu_line "8" "TUIC" "尽力阻断 TUIC / 非 Web 端口 QUIC 代理"
-    menu_line "9" "UDP-FET" "阻断 UDP 高熵加密流量"
+    menu_line "9" "UDP 高熵加密 UDP-FET" "阻断加密特征明显的 UDP payload"
     menu_line "10" "VLESS TCP" "阻断裸 VLESS over TCP"
     menu_line "11" "VMess TCP" "阻断裸 VMess over TCP"
     menu_line "0" "返回主菜单"
-    echo -e "${DIM}支持批量输入：1 3 6-11、1-3-6；输入 all 全选；输入 none 不启用规则。${NC}"
     echo ""
+    echo -e "${BOLD}快捷组合：${NC}"
+    echo -e "  ${CYAN}safe${NC}  推荐托管防滥用组合：邮件 + HTTP + SOCKS + TCP-FET + WG + HY2 + TUIC + UDP-FET + VLESS + VMess"
+    echo -e "  ${CYAN}node${NC}  节点协议组合：SOCKS + TCP-FET + WG + QUIC + HY2 + TUIC + UDP-FET + VLESS + VMess"
+    echo -e "  ${CYAN}tcp${NC}   TCP 弱节点组合：SOCKS + TCP-FET + VLESS + VMess"
+    echo -e "  ${CYAN}udp${NC}   UDP 节点组合：WG + QUIC + HY2 + TUIC + UDP-FET"
+    echo -e "  ${CYAN}mail${NC}  只启用邮件防滥用"
+    echo ""
+    echo -e "${DIM}支持批量输入：1 3 6-11、1-3-6、mail node、email socks hy2；输入 all 全选；输入 none 不启用规则。${NC}"
+    echo ""
+}
+
+expand_manual_choice() {
+    local input="${1:-all}"
+    case "$input" in
+        all|全部)
+            echo "1-11"
+            ;;
+        safe|recommended|推荐)
+            echo "1 2 3 4 5 7 8 9 10 11"
+            ;;
+        node|节点)
+            echo "3 4 5 6 7 8 9 10 11"
+            ;;
+        tcp|tcp-node)
+            echo "3 4 10 11"
+            ;;
+        udp|udp-node)
+            echo "5 6 7 8 9"
+            ;;
+        mail|email|smtp|邮件)
+            echo "1"
+            ;;
+        web)
+            echo "2"
+            ;;
+        *)
+            echo "$input"
+            ;;
+    esac
 }
 
 build_manual_rules() {
@@ -508,17 +546,17 @@ build_manual_rules() {
             return 0
         fi
 
-        if [[ "$choice" == "all" || "$choice" == "全部" ]]; then
-            choice="1-11"
-        fi
-
         RFW_ARGS="$base_args"
-        for token in $(expand_selection_tokens "$choice"); do
-            if rule=$(manual_rule_name "$token"); then
-                append_rule "$rule"
-            else
-                invalid="true"
-            fi
+        for token in $(expand_selection_tokens "$(expand_manual_choice "$choice")"); do
+            token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+            local expanded_token=""
+            for expanded_token in $(expand_selection_tokens "$(expand_manual_choice "$token")"); do
+                if rule=$(manual_rule_name "$expanded_token"); then
+                    append_rule "$rule"
+                else
+                    invalid="true"
+                fi
+            done
         done
 
         RFW_ARGS="${RFW_ARGS# }"
@@ -526,7 +564,7 @@ build_manual_rules() {
             log "已选择规则：${RFW_ARGS:-<无>}"
             return 0
         fi
-        warn "选择无效，请重新输入。示例：1 3 6-11 或 all"
+        warn "选择无效，请重新输入。示例：1 3 6-11、mail node 或 safe"
     done
 
     RFW_ARGS="${RFW_ARGS# }"
@@ -1187,7 +1225,7 @@ main_menu() {
         wide_divider
         menu_line "1" "快速强力部署" "(所有节点阻断规则，默认只阻断中国来源 CN)"
         menu_line "2" "批量选择规则模板部署" "(支持 2 3 4 / 2-3-4 / 2-4 / hy2,tuic,tcp-node)"
-        menu_line "3" "批量自定义阻断规则部署" "(支持 1 3 6-11 / all)"
+        menu_line "3" "批量自定义阻断规则部署" "(支持 mail/node/tcp/udp/safe、1 3 6-11、all)"
         menu_line "4" "手动输入完整 RFW 参数部署"
         menu_line "5" "查看服务状态和启动命令"
         menu_line "6" "查看最近运行日志"
