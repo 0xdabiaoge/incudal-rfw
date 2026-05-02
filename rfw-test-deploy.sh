@@ -642,6 +642,7 @@ configure_scope_menu() {
 configure_runtime_menu() {
     section_title "运行选项"
     echo -e "${DIM}输入 0 可返回主菜单。${NC}"
+    echo -e "${DIM}二进制文件固定从 GitHub 最新 Release 下载；如需自定义地址，请使用命令行 --binary-url 或 --release-url。${NC}"
 
     XDP_MODE=$(prompt_input "XDP 挂载模式 auto/skb/drv/hw" "${XDP_MODE:-auto}")
     if [[ "$XDP_MODE" == "0" ]]; then
@@ -660,25 +661,6 @@ configure_runtime_menu() {
         LOG_PORT_ACCESS="true"
     else
         LOG_PORT_ACCESS="false"
-    fi
-
-    if prompt_yes_no "自定义二进制或 Release 下载地址？" "no"; then
-        echo -ne "${BOLD}下载方式：1) 最新 Release  2) 自定义 Release 基础地址  3) 完整二进制 URL  0) 返回 [默认 1]：${NC}"
-        local answer=""
-        read -r answer || true
-        case "${answer:-1}" in
-            0)
-                request_menu_back
-                return 0
-                ;;
-            2) RELEASE_URL=$(prompt_input "请输入 Release 基础地址" "$DEFAULT_RELEASE_URL") ;;
-            3) BINARY_URL=$(prompt_input "请输入完整二进制 URL" "") ;;
-            *) RELEASE_URL="$DEFAULT_RELEASE_URL" ;;
-        esac
-        if [[ "$RELEASE_URL" == "0" || "$BINARY_URL" == "0" ]]; then
-            request_menu_back
-            return 0
-        fi
     fi
 }
 
