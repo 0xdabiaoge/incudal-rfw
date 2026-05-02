@@ -16,7 +16,7 @@ Incudal RFW 是一个面向 Linux 宿主机的 IPv4 入站防火墙，基于 eBP
 - 支持按协议特征识别常见节点协议，而不是单纯按端口阻断。
 - 支持 SOCKS、VLESS TCP、VMess TCP、HY2、TUIC、QUIC、WireGuard、
   UDP 高熵加密流量、明文 HTTP、SMTP 发信滥用等规则。
-- 提供测试部署脚本，可从 GitHub Release 下载产物并安装为 systemd 服务。
+- 提供中文正式部署脚本，可从 GitHub Release 下载产物并安装为 systemd 服务。
 
 ## 规则说明
 
@@ -140,69 +140,70 @@ sudo ./rfw stats --blocked-only
 sudo ./rfw stats --group-by-port
 ```
 
-## 测试部署脚本
+## 正式部署脚本
 
-`rfw-test-deploy.sh` 用于在测试机器上快速部署 GitHub Release 产物。直接运行
-脚本会进入中文交互菜单；带参数运行则保持命令行模式。它会：
+`rfw-test-deploy.sh` 用于在宿主机上直接部署 GitHub Release 产物。直接运行
+脚本会进入中文控制台；带参数运行则保持命令行模式。它会：
 
 1. 根据架构下载 Release 二进制；
 2. 安装到 `/root/rfw/rfw`；
 3. 写入 `/etc/systemd/system/rfw.service`；
 4. 启动并设置开机自启；
-5. 卸载时可一并清理脚本副本和当前脚本本身。
+5. 提供规则开关、日志、端口统计和完整卸载功能；
+6. 卸载时可一并清理脚本副本和当前脚本本身。
 
-交互式菜单：
+打开控制台：
 
 ```bash
 sudo bash rfw-test-deploy.sh
 ```
 
-全局强力节点阻断：
+控制台主要功能：
 
-```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile strong --yes
-```
+- 安装 / 重新部署：下载正式 Release，并按当前自选规则启动。
+- 规则开关管理：逐条启用或关闭阻断规则，保存后自动重写 systemd 并重启生效。
+- 查看当前配置：展示网卡、XDP 模式、作用范围、端口统计和完整启动命令。
+- 查看运行日志、拦截日志和实时日志。
+- 查看端口访问/拦截统计。
+- 重启服务或完整卸载并删除脚本。
 
-测试 HY2 / 混淆 HY2：
+默认策略：
 
-```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2
-```
+- 默认只对中国来源 `CN` 生效。
+- 默认启用端口访问/拦截统计。
+- 默认启用推荐阻断规则：邮件、HTTP、SOCKS、TCP-FET 严格、WireGuard、HY2、TUIC、UDP-FET、VLESS TCP、VMess TCP。
+- `QUIC 总开关` 和 `全入站阻断` 默认不开，需要你在规则开关里手动开启。
 
-测试 TUIC：
-
-```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile tuic
-```
-
-测试 TCP 弱节点协议：
-
-```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile tcp-node
-```
-
-模板是预设规则组合，不是单条规则。模板支持批量组合，脚本会自动合并并去重：
-
-```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2,tuic,tcp-node
-```
-
-在交互菜单中也可以输入 `2 3 4`、`2-3-4`、`2-4` 或 `hy2,tuic,tcp-node`。
-`manual` 是自定义规则入口，不能和其它模板混选；要自定义时请单独选择 `6`。
-自定义阻断规则同样支持批量输入，例如 `1 3 6-11`、`mail node` 或 `all`。
-邮件防滥用在自定义规则里是独立选项，也可以直接输入 `mail`、`email` 或 `smtp`。
-快捷组合包括 `safe`、`node`、`tcp`、`udp`、`mail`。
-在任意部署子菜单中输入 `0` 可以返回主菜单，不会继续执行当前部署流程。
-
-可选 profile：
+规则开关支持批量输入：
 
 ```text
-strong    QUIC、HY2、TUIC、VLESS、VMess、UDP-FET、SOCKS、WG、HTTP、Email 全开
-hy2       重点测试 HY2 / 混淆 HY2 / UDP 滥用
-tuic      重点测试 TUIC / 非 Web 端口 QUIC 代理
-tcp-node  重点测试 VLESS / VMess / SOCKS / FET 这类 TCP 弱协议
-baseline  基础节点阻断组合
-manual    批量自定义规则选择
+3 7 8          切换 SOCKS、QUIC、HY2
+1-4            切换 1 到 4 号规则
+mail hy2 tuic  切换邮件、HY2、TUIC
+a              全部开启
+n              全部关闭
+d              恢复推荐规则
+s              保存并应用
+0              返回主菜单
+```
+
+直接使用默认推荐规则部署：
+
+```bash
+sudo bash rfw-test-deploy.sh --install --iface eth0 --yes
+```
+
+直接传入完整 RFW 参数：
+
+```bash
+sudo bash rfw-test-deploy.sh --iface eth0 --rules "--block-socks5 --block-hysteria2 --countries CN --log-port-access" --yes
+```
+
+只阻断中国来源是默认行为。如果要测试所有来源都被拦截，请在控制台的作用范围中选择
+“不区分国家”，或者命令行使用：
+
+```bash
+sudo bash rfw-test-deploy.sh --iface eth0 --geo-mode none --yes
 ```
 
 常用操作：
@@ -216,11 +217,16 @@ sudo bash rfw-test-deploy.sh --restart
 sudo bash rfw-test-deploy.sh --uninstall
 ```
 
-注意：默认规则会附加 `--countries CN`。如果要测试所有来源都被拦截，请在脚本中选择
-“不区分国家”，或者命令行使用：
+兼容说明：旧版 `--profile` 参数仍可解析，方便已有命令过渡；新的控制台不再展示
+模板概念，建议以后直接使用规则开关或 `--rules`。
+
+端口访问统计：
 
 ```bash
---geo-mode none
+sudo bash rfw-test-deploy.sh --stats
+sudo /root/rfw/rfw stats --blocked-only
+sudo /root/rfw/rfw stats --group-by-port
+sudo /root/rfw/rfw stats --port 443
 ```
 
 脚本会把 `--geo-mode none` 转换为 RFW 的 `--all-sources` 参数。
@@ -285,7 +291,7 @@ rfw-aarch64-unknown-linux-musl
 checksums.txt
 ```
 
-测试部署脚本默认从这里下载最新版：
+正式部署脚本默认从这里下载最新版：
 
 ```text
 https://github.com/0xdabiaoge/incudal-rfw/releases/latest/download

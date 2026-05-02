@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-# RFW 测试部署脚本
+# Incudal-RFW 正式部署脚本
 #
-# 本脚本用于复刻 Incudal 宿主机安装器的 RFW 部署路径：
-# 从 GitHub Release 下载预编译二进制，安装到 /root/rfw，写入 systemd
-# 服务，并在选定网卡上启动 RFW。
+# 从 GitHub Release 下载 Incudal-RFW 预编译二进制，安装到 /root/rfw，
+# 写入 systemd 服务，并提供中文交互控制台管理规则、日志、统计和卸载。
 # ============================================================================
 set -euo pipefail
 
-readonly SCRIPT_VERSION="0.2.2"
+readonly SCRIPT_VERSION="1.0.0"
 readonly DEFAULT_RELEASE_URL="https://github.com/0xdabiaoge/incudal-rfw/releases/latest/download"
 readonly RFW_INSTALL_DIR="/root/rfw"
 readonly RFW_BIN_PATH="${RFW_INSTALL_DIR}/rfw"
@@ -20,6 +19,7 @@ readonly GREEN='\033[1;32m'
 readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[1;34m'
 readonly CYAN='\033[1;36m'
+readonly MAGENTA='\033[1;35m'
 readonly BOLD='\033[1m'
 readonly DIM='\033[2m'
 readonly NC='\033[0m'
@@ -30,16 +30,66 @@ RFW_ARGS=""
 BINARY_URL=""
 RELEASE_URL="$DEFAULT_RELEASE_URL"
 XDP_MODE="auto"
-ENABLE_DEFAULT_RULES="true"
-COUNTRIES="CN"
 GEO_MODE="blacklist"
-LOG_PORT_ACCESS="false"
+COUNTRIES="CN"
+LOG_PORT_ACCESS="true"
 FORCE="false"
 NON_INTERACTIVE="false"
 SHOW_LOGS_ON_FAILURE="true"
-RULE_PROFILE=""
 DELETE_SELF_ON_UNINSTALL="true"
 MENU_BACK="false"
+SELECTED_RULES=""
+CUSTOM_RFW_ARGS="false"
+
+RULE_FLAGS=(
+    "--block-email"
+    "--block-http"
+    "--block-socks5"
+    "--block-fet-strict"
+    "--block-fet-loose"
+    "--block-wireguard"
+    "--block-quic"
+    "--block-hysteria2"
+    "--block-tuic"
+    "--block-udp-fet"
+    "--block-vless-tcp"
+    "--block-vmess-tcp"
+    "--block-all"
+)
+
+RULE_NAMES=(
+    "邮件防滥用"
+    "明文 HTTP"
+    "SOCKS 代理"
+    "TCP-FET 严格"
+    "TCP-FET 宽松"
+    "WireGuard"
+    "QUIC 总开关"
+    "Hysteria2 / HY2"
+    "TUIC"
+    "UDP-FET"
+    "VLESS TCP"
+    "VMess TCP"
+    "全入站阻断"
+)
+
+RULE_DESCS=(
+    "阻断 SMTP 常用端口，防止发信滥用"
+    "阻断明文 HTTP 入站请求"
+    "阻断 SOCKS4 / SOCKS4a / SOCKS5"
+    "严格阻断高熵 TCP 加密流量，拦截力度更强"
+    "宽松检测高熵 TCP 加密流量，误伤更低"
+    "阻断 WireGuard UDP 握手"
+    "粗暴阻断可识别 QUIC，HY2/TUIC/HTTP3 会一起受影响"
+    "尽力阻断 HY2、混淆 HY2 和明显 UDP 滥用"
+    "尽力阻断 TUIC 和非 Web 端口 QUIC 代理"
+    "阻断 UDP 高熵加密 payload"
+    "阻断裸 VLESS over TCP"
+    "阻断裸 VMess over TCP"
+    "危险规则：阻断匹配来源的全部入站流量"
+)
+
+DEFAULT_RULES="--block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --block-hysteria2 --block-tuic --block-udp-fet --block-vless-tcp --block-vmess-tcp"
 
 log() { echo -e "${GREEN}[OK]${NC} $1"; }
 info() { echo -e "${BLUE}[i]${NC} $1"; }
@@ -72,30 +122,13 @@ menu_line() {
     fi
 }
 
-append_rule() {
-    local rule="$1"
-    case " ${RFW_ARGS} " in
-        *" ${rule} "*) ;;
-        *) RFW_ARGS="${RFW_ARGS} ${rule}" ;;
-    esac
-}
-
-request_menu_back() {
-    MENU_BACK="true"
-    info "已返回主菜单。"
-}
-
-is_menu_back() {
-    [[ "$MENU_BACK" == "true" ]]
-}
-
 usage() {
     cat <<EOF
-RFW 测试部署脚本 v${SCRIPT_VERSION}
+Incudal-RFW 正式部署脚本 v${SCRIPT_VERSION}
 
 用法：
-  sudo bash rfw-test-deploy.sh                 # 打开交互式中文菜单
-  sudo bash rfw-test-deploy.sh [参数]          # 直接部署
+  sudo bash rfw-test-deploy.sh                 # 打开中文控制台
+  sudo bash rfw-test-deploy.sh --install       # 使用默认规则部署
   sudo bash rfw-test-deploy.sh --status
   sudo bash rfw-test-deploy.sh --logs
   sudo bash rfw-test-deploy.sh --block-logs
@@ -103,44 +136,29 @@ RFW 测试部署脚本 v${SCRIPT_VERSION}
   sudo bash rfw-test-deploy.sh --restart
   sudo bash rfw-test-deploy.sh --uninstall
 
-交互提示：
-  在子菜单中输入 0 可以返回主菜单，不会继续执行当前部署流程。
+默认策略：
+  默认只对中国来源 CN 生效，并启用端口访问/拦截统计。
+  默认规则：邮件、HTTP、SOCKS、TCP-FET 严格、WG、HY2、TUIC、UDP-FET、VLESS TCP、VMess TCP。
 
-安装参数：
-  --iface <网卡名>            指定要挂载 XDP 的网卡。
-  --binary-url <URL>          指定完整的 RFW 二进制下载地址。
-  --release-url <URL>         指定 Release 下载基础地址。
-                              默认：${DEFAULT_RELEASE_URL}
-  --rules "<参数>"            直接传入原始 RFW 规则参数，会覆盖默认规则。
-                              示例：--rules "--countries CN --block-http"
-  --no-default-rules          不生成默认规则；除非同时指定 --rules。
-  --profile <配置>            规则模板。模板是预设规则组合，不是单条规则。
-                              可选：strong、hy2、tuic、tcp-node、baseline、manual。
-                              支持组合：--profile hy2,tuic,tcp-node
-                              manual 是自定义规则入口，不能和其它模板混选。
-  --countries <列表>          默认规则使用的国家代码列表，默认：CN。
+部署参数：
+  --iface <网卡名>             指定挂载 XDP 的网卡
+  --rules "<RFW参数>"          直接传入完整 RFW 参数，会覆盖脚本生成规则
+  --countries <国家代码>       默认 CN
   --geo-mode <blacklist|whitelist|none>
-                              默认规则的 GeoIP 模式，默认：blacklist。
-  --log-port-access           在生成规则中加入 --log-port-access。
-  --xdp-mode <auto|skb|drv|hw>
-                              XDP 挂载模式，默认：auto。
-  --force                     不再确认，直接执行。
-  --yes                       非交互模式。
-  --keep-script               卸载时保留 rfw-test-deploy.sh 脚本文件。
+                               blacklist=只阻断指定国家来源；none=所有来源生效
+  --log-port-access            启用端口访问/拦截统计
+  --no-log-port-access         关闭端口访问/拦截统计
+  --xdp-mode <auto|skb|drv|hw> XDP 挂载模式
+  --binary-url <URL>           指定完整二进制下载地址
+  --release-url <URL>          指定 Release 下载基础地址
+  --force                      跳过确认
+  --yes                        非交互执行
+  --keep-script                卸载时保留脚本文件
 
-规则配置：
-  strong      强力阻断：QUIC、HY2、TUIC、VLESS、VMess、UDP-FET、SOCKS、WG、HTTP、Email 全开
-  hy2         重点测试 HY2 / 混淆 HY2 / UDP 滥用
-  tuic        重点测试 TUIC / 非 Web 端口 QUIC 代理
-  tcp-node    重点测试 VLESS、VMess、SOCKS、FET 这类 TCP 弱节点协议
-  baseline    基础节点阻断组合
-  manual      批量自定义规则选择
-
-示例：
-  sudo bash rfw-test-deploy.sh --iface eth0 --profile strong --yes
-  sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2,tuic,tcp-node
-  sudo bash rfw-test-deploy.sh --iface eth0 --xdp-mode skb --log-port-access
-  sudo bash rfw-test-deploy.sh --iface eth0 --rules "--block-all-from CN --log-port-access"
+规则开关：
+  可在控制台中随时启用/关闭单条规则并应用到 systemd 服务。
+  也可用 --rules 手动传入，例如：
+    sudo bash rfw-test-deploy.sh --iface eth0 --rules "--block-socks5 --block-hysteria2 --countries CN --log-port-access" --yes
 EOF
 }
 
@@ -152,6 +170,15 @@ pause_enter() {
     echo ""
     echo -ne "${DIM}按回车继续...${NC}"
     read -r _ || true
+}
+
+request_menu_back() {
+    MENU_BACK="true"
+    info "已返回主菜单。"
+}
+
+is_menu_back() {
+    [[ "$MENU_BACK" == "true" ]]
 }
 
 require_root() {
@@ -252,6 +279,254 @@ detect_arch_suffix() {
     esac
 }
 
+expand_selection_tokens() {
+    local input="$1"
+    local token=""
+    local start=""
+    local end=""
+    local i=""
+
+    input=${input//,/ }
+    input=${input//，/ }
+    input=${input//、/ }
+
+    for token in $input; do
+        if [[ "$token" =~ ^[0-9]+(-[0-9]+){2,}$ ]]; then
+            printf '%s\n' "$token" | tr '-' '\n'
+        elif [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            start="${BASH_REMATCH[1]}"
+            end="${BASH_REMATCH[2]}"
+            if (( start <= end )); then
+                for ((i = start; i <= end; i++)); do
+                    echo "$i"
+                done
+            else
+                for ((i = start; i >= end; i--)); do
+                    echo "$i"
+                done
+            fi
+        else
+            echo "$token"
+        fi
+    done
+}
+
+normalize_spaces() {
+    local value="${1:-}"
+    local token=""
+    local result=""
+    for token in $value; do
+        result="${result} ${token}"
+    done
+    printf '%s\n' "${result# }"
+}
+
+has_word() {
+    local haystack=" $1 "
+    local needle="$2"
+    [[ "$haystack" == *" ${needle} "* ]]
+}
+
+add_word() {
+    local haystack="$1"
+    local needle="$2"
+    if has_word "$haystack" "$needle"; then
+        printf '%s\n' "$(normalize_spaces "$haystack")"
+    else
+        printf '%s\n' "$(normalize_spaces "${haystack} ${needle}")"
+    fi
+}
+
+remove_word() {
+    local haystack="$1"
+    local needle="$2"
+    local token=""
+    local result=""
+    for token in $haystack; do
+        [[ "$token" == "$needle" ]] && continue
+        result="${result} ${token}"
+    done
+    printf '%s\n' "$(normalize_spaces "$result")"
+}
+
+rule_count() {
+    echo "${#RULE_FLAGS[@]}"
+}
+
+rule_flag_by_index() {
+    local index="$1"
+    echo "${RULE_FLAGS[$((index - 1))]}"
+}
+
+rule_name_by_index() {
+    local index="$1"
+    echo "${RULE_NAMES[$((index - 1))]}"
+}
+
+rule_desc_by_index() {
+    local index="$1"
+    echo "${RULE_DESCS[$((index - 1))]}"
+}
+
+rule_name_by_flag() {
+    local flag="$1"
+    local i=""
+    for i in "${!RULE_FLAGS[@]}"; do
+        if [[ "${RULE_FLAGS[$i]}" == "$flag" ]]; then
+            echo "${RULE_NAMES[$i]}"
+            return 0
+        fi
+    done
+    echo "$flag"
+}
+
+flag_from_rule_token() {
+    local token="$1"
+    token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$token" =~ ^[0-9]+$ ]] && (( token >= 1 && token <= $(rule_count) )); then
+        rule_flag_by_index "$token"
+        return 0
+    fi
+
+    case "$token" in
+        mail|email|smtp) echo "--block-email" ;;
+        http|web) echo "--block-http" ;;
+        socks|socks5) echo "--block-socks5" ;;
+        fet|fet-strict|tcp-fet|strict) echo "--block-fet-strict" ;;
+        fet-loose|loose|tcp-fet-loose) echo "--block-fet-loose" ;;
+        wg|wireguard) echo "--block-wireguard" ;;
+        quic) echo "--block-quic" ;;
+        hy2|hysteria2) echo "--block-hysteria2" ;;
+        tuic) echo "--block-tuic" ;;
+        udp-fet|udpfet) echo "--block-udp-fet" ;;
+        vless|vless-tcp) echo "--block-vless-tcp" ;;
+        vmess|vmess-tcp) echo "--block-vmess-tcp" ;;
+        block-all|all-inbound|danger) echo "--block-all" ;;
+        *) return 1 ;;
+    esac
+}
+
+sanitize_rule_conflicts() {
+    if has_word "$SELECTED_RULES" "--block-fet-strict" && has_word "$SELECTED_RULES" "--block-fet-loose"; then
+        SELECTED_RULES=$(remove_word "$SELECTED_RULES" "--block-fet-loose")
+        warn "TCP-FET 严格和宽松不能同时开启，已保留严格模式。"
+    fi
+}
+
+toggle_rule() {
+    local flag="$1"
+    if has_word "$SELECTED_RULES" "$flag"; then
+        SELECTED_RULES=$(remove_word "$SELECTED_RULES" "$flag")
+    else
+        if [[ "$flag" == "--block-fet-strict" ]]; then
+            SELECTED_RULES=$(remove_word "$SELECTED_RULES" "--block-fet-loose")
+        elif [[ "$flag" == "--block-fet-loose" ]]; then
+            SELECTED_RULES=$(remove_word "$SELECTED_RULES" "--block-fet-strict")
+        fi
+        SELECTED_RULES=$(add_word "$SELECTED_RULES" "$flag")
+    fi
+    sanitize_rule_conflicts
+}
+
+rules_to_names() {
+    local rules="${1:-}"
+    local flag=""
+    local result=""
+    for flag in $rules; do
+        result="${result}$(rule_name_by_flag "$flag")、"
+    done
+    result="${result%、}"
+    printf '%s\n' "${result:-无}"
+}
+
+sync_selected_rules_from_args() {
+    local exec_text="${1:-$RFW_ARGS}"
+    local flag=""
+    SELECTED_RULES=""
+    for flag in "${RULE_FLAGS[@]}"; do
+        if [[ " $exec_text " == *" ${flag} "* ]]; then
+            SELECTED_RULES=$(add_word "$SELECTED_RULES" "$flag")
+        fi
+    done
+}
+
+extract_exec_start() {
+    local service_file=""
+    for service_file in "$RFW_SERVICE_FILE" "/usr/lib/systemd/system/${RFW_SERVICE_NAME}.service" "/lib/systemd/system/${RFW_SERVICE_NAME}.service"; do
+        [[ -f "$service_file" ]] || continue
+        grep '^ExecStart=' "$service_file" 2>/dev/null | sed 's/^ExecStart=//' || true
+        return 0
+    done
+}
+
+extract_arg_after() {
+    local arg_name="$1"
+    local exec_start=""
+    exec_start=$(extract_exec_start || true)
+    [[ -n "$exec_start" ]] || return 1
+    printf '%s\n' "$exec_start" | awk -v key="$arg_name" '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == key) {
+                    value = $(i + 1);
+                    gsub(/^"/, "", value);
+                    gsub(/"$/, "", value);
+                    print value;
+                    exit;
+                }
+            }
+        }'
+}
+
+load_current_config() {
+    local exec_start=""
+    local flag=""
+
+    exec_start=$(extract_exec_start || true)
+    if [[ -z "$exec_start" ]]; then
+        SELECTED_RULES="$DEFAULT_RULES"
+        GEO_MODE="blacklist"
+        COUNTRIES="CN"
+        LOG_PORT_ACCESS="true"
+        return 0
+    fi
+
+    SELECTED_RULES=""
+    for flag in "${RULE_FLAGS[@]}"; do
+        if [[ " $exec_start " == *" ${flag} "* ]]; then
+            SELECTED_RULES=$(add_word "$SELECTED_RULES" "$flag")
+        fi
+    done
+    [[ -z "$SELECTED_RULES" ]] && SELECTED_RULES="$DEFAULT_RULES"
+
+    IFACE=$(extract_arg_after "--iface" || true)
+    XDP_MODE=$(extract_arg_after "--xdp-mode" || true)
+    [[ -z "$XDP_MODE" ]] && XDP_MODE="auto"
+
+    if [[ " $exec_start " == *" --all-sources "* ]]; then
+        GEO_MODE="none"
+        COUNTRIES=""
+    elif [[ " $exec_start " == *" --allow-only-countries "* ]]; then
+        GEO_MODE="whitelist"
+        COUNTRIES=$(extract_arg_after "--allow-only-countries" || true)
+        [[ -z "$COUNTRIES" ]] && COUNTRIES="CN"
+    elif [[ " $exec_start " == *" --countries "* ]]; then
+        GEO_MODE="blacklist"
+        COUNTRIES=$(extract_arg_after "--countries" || true)
+        [[ -z "$COUNTRIES" ]] && COUNTRIES="CN"
+    else
+        GEO_MODE="blacklist"
+        COUNTRIES="CN"
+    fi
+
+    if [[ " $exec_start " == *" --log-port-access "* ]]; then
+        LOG_PORT_ACCESS="true"
+    else
+        LOG_PORT_ACCESS="false"
+    fi
+}
+
 choose_iface() {
     if [[ -n "$IFACE" ]]; then
         if ! ip link show "$IFACE" >/dev/null 2>&1; then
@@ -286,13 +561,9 @@ choose_iface() {
         return 0
     fi
 
-    if [[ -n "$default_iface" ]]; then
-        echo -e "  ${DIM}默认路由网卡：${default_iface}${NC}"
-    fi
-
-    echo ""
-    echo "可用网卡："
-    local i
+    section_title "选择网卡"
+    [[ -n "$default_iface" ]] && echo -e "  ${DIM}默认路由网卡：${default_iface}${NC}"
+    local i=""
     for i in "${!interfaces[@]}"; do
         local num=$((i + 1))
         local iface_ip=""
@@ -303,11 +574,11 @@ choose_iface() {
             echo -e "  ${CYAN}${num})${NC} ${interfaces[$i]}"
         fi
     done
-    echo -e "  ${CYAN}0)${NC} 返回主菜单"
+    menu_line "0" "返回主菜单"
     echo ""
 
     while true; do
-        echo -ne "${BOLD}请选择网卡 [1-${#interfaces[@]}，0 返回]：${NC}"
+        echo -ne "${BOLD}请选择网卡 [1-${#interfaces[@]}；0 返回]：${NC}"
         local choice=""
         read -r choice || true
         if [[ "${choice:-}" == "0" ]]; then
@@ -322,396 +593,219 @@ choose_iface() {
     done
 }
 
-profile_name_from_token() {
-    case "$1" in
-        1|strong) echo "strong" ;;
-        2|hy2) echo "hy2" ;;
-        3|tuic) echo "tuic" ;;
-        4|tcp-node|tcp|tcpnode) echo "tcp-node" ;;
-        5|baseline|base) echo "baseline" ;;
-        6|manual|custom) echo "manual" ;;
-        *) return 1 ;;
-    esac
-}
-
-expand_selection_tokens() {
-    local input="$1"
-    local token=""
-    local start=""
-    local end=""
-    local i=""
-
-    input=${input//,/ }
-    input=${input//，/ }
-    input=${input//、/ }
-
-    for token in $input; do
-        if [[ "$token" =~ ^[0-9]+(-[0-9]+){2,}$ ]]; then
-            printf '%s\n' "$token" | tr '-' '\n'
-        elif [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-            start="${BASH_REMATCH[1]}"
-            end="${BASH_REMATCH[2]}"
-            if (( start <= end )); then
-                for ((i = start; i <= end; i++)); do
-                    echo "$i"
-                done
-            else
-                for ((i = start; i >= end; i--)); do
-                    echo "$i"
-                done
-            fi
-        else
-            echo "$token"
-        fi
-    done
-}
-
-profile_desc() {
-    case "$1" in
-        strong) echo "强力阻断：QUIC、HY2、TUIC、VLESS、VMess、UDP-FET、SOCKS、WG、HTTP、Email 全开" ;;
-        hy2) echo "重点测试 HY2 / 混淆 HY2 / UDP 滥用，比 --block-quic 更克制" ;;
-        tuic) echo "重点测试 TUIC / 非 Web 端口 QUIC 代理" ;;
-        tcp-node) echo "重点测试 VLESS、VMess、SOCKS、FET 这类 TCP 弱节点协议" ;;
-        baseline) echo "基础节点阻断组合，不启用 HY2/TUIC 拆分规则" ;;
-        manual) echo "进入自定义规则批量选择" ;;
-    esac
-}
-
-profile_has_manual_mix() {
-    local profiles="$1"
-    [[ " ${profiles} " == *" manual "* ]] || return 1
-    [[ "$(wc -w <<< "$profiles" | tr -d ' ')" -gt 1 ]]
-}
-
-show_selected_profiles() {
-    local profiles="$1"
-    local profile=""
-
-    echo ""
-    echo -e "${BOLD}已选择的模板：${NC}"
-    for profile in $profiles; do
-        echo -e "  ${CYAN}- ${profile}${NC} ${DIM}$(profile_desc "$profile")${NC}"
-    done
-}
-
-normalize_profile_selection() {
-    local input="${1:-strong}"
-    local token=""
-    local profile=""
-    local result=""
-
-    for token in $(expand_selection_tokens "$input"); do
-        if profile=$(profile_name_from_token "$token"); then
-            case " ${result} " in
-                *" ${profile} "*) ;;
-                *) result="${result} ${profile}" ;;
-            esac
-        else
-            return 1
-        fi
-    done
-
-    printf '%s\n' "${result# }"
-}
-
-show_profile_menu() {
-    section_title "规则模板"
-    echo -e "${DIM}模板是预设规则组合，不是单条规则。选择多个模板时会合并规则并自动去重。${NC}"
-    echo -e "${DIM}如果你想逐条选择规则，请单独选择 6，不要和其它模板混选。${NC}"
-    echo ""
-    menu_line "1" "strong" "强力阻断：QUIC、HY2、TUIC、VLESS、VMess、UDP-FET、SOCKS、WG、HTTP、Email 全开"
-    menu_line "2" "hy2" "重点测试 HY2 / 混淆 HY2 / UDP 滥用"
-    menu_line "3" "tuic" "重点测试 TUIC / 非 Web 端口 QUIC 代理"
-    menu_line "4" "tcp-node" "重点测试 VLESS、VMess、SOCKS、FET 这类 TCP 弱节点协议"
-    menu_line "5" "baseline" "基础节点阻断组合"
-    menu_line "6" "manual" "进入自定义规则批量选择，不能和其它模板混选"
+configure_scope_menu() {
+    section_title "作用范围"
+    echo -e "${DIM}正式默认策略：只对中国来源 CN 生效。除非你明确测试全来源，否则建议保持默认。${NC}"
+    menu_line "1" "只阻断指定国家来源" "默认 CN"
+    menu_line "2" "只允许指定国家，其余来源按规则阻断"
+    menu_line "3" "不区分国家，对所有来源生效"
     menu_line "0" "返回主菜单"
-    echo -e "${DIM}支持批量输入：2 3 4、2-3-4、2-4、hy2,tuic,tcp-node。规则会自动合并去重。${NC}"
     echo ""
+    echo -ne "${BOLD}请选择作用范围 [默认 1；0 返回]：${NC}"
+
+    local choice=""
+    read -r choice || true
+    case "${choice:-1}" in
+        0)
+            request_menu_back
+            return 0
+            ;;
+        1)
+            GEO_MODE="blacklist"
+            COUNTRIES=$(prompt_input "请输入国家代码列表" "${COUNTRIES:-CN}")
+            [[ "$COUNTRIES" == "0" ]] && request_menu_back
+            ;;
+        2)
+            GEO_MODE="whitelist"
+            COUNTRIES=$(prompt_input "请输入允许的国家代码列表" "${COUNTRIES:-CN}")
+            [[ "$COUNTRIES" == "0" ]] && request_menu_back
+            ;;
+        3)
+            GEO_MODE="none"
+            COUNTRIES=""
+            ;;
+        *)
+            warn "选择无效，已保持默认：只阻断中国来源 CN。"
+            GEO_MODE="blacklist"
+            COUNTRIES="CN"
+            ;;
+    esac
 }
 
-select_rule_profile() {
-    if [[ -n "$RULE_PROFILE" || "$NON_INTERACTIVE" == "true" ]]; then
+configure_runtime_menu() {
+    section_title "运行选项"
+    echo -e "${DIM}输入 0 可返回主菜单。${NC}"
+
+    XDP_MODE=$(prompt_input "XDP 挂载模式 auto/skb/drv/hw" "${XDP_MODE:-auto}")
+    if [[ "$XDP_MODE" == "0" ]]; then
+        request_menu_back
         return 0
     fi
+    case "$XDP_MODE" in
+        auto|skb|drv|driver|hw|hardware) ;;
+        *)
+            warn "XDP 模式无效，自动改为 auto。"
+            XDP_MODE="auto"
+            ;;
+    esac
 
-    show_profile_menu
+    if prompt_yes_no "启用端口访问/拦截统计？" "$([[ "$LOG_PORT_ACCESS" == "true" ]] && echo yes || echo no)"; then
+        LOG_PORT_ACCESS="true"
+    else
+        LOG_PORT_ACCESS="false"
+    fi
 
-    while true; do
-        echo -ne "${BOLD}请选择规则模板 [可批量，默认 1；0 返回]：${NC}"
-        local choice=""
-        local normalized=""
-        read -r choice || true
-        if [[ "${choice:-}" == "0" ]]; then
+    if prompt_yes_no "自定义二进制或 Release 下载地址？" "no"; then
+        echo -ne "${BOLD}下载方式：1) 最新 Release  2) 自定义 Release 基础地址  3) 完整二进制 URL  0) 返回 [默认 1]：${NC}"
+        local answer=""
+        read -r answer || true
+        case "${answer:-1}" in
+            0)
+                request_menu_back
+                return 0
+                ;;
+            2) RELEASE_URL=$(prompt_input "请输入 Release 基础地址" "$DEFAULT_RELEASE_URL") ;;
+            3) BINARY_URL=$(prompt_input "请输入完整二进制 URL" "") ;;
+            *) RELEASE_URL="$DEFAULT_RELEASE_URL" ;;
+        esac
+        if [[ "$RELEASE_URL" == "0" || "$BINARY_URL" == "0" ]]; then
             request_menu_back
             return 0
         fi
-        if normalized=$(normalize_profile_selection "${choice:-1}"); then
-            if profile_has_manual_mix "$normalized"; then
-                warn "manual 是自定义规则入口，不能和其它模板混选。请只输入 6，或只选择 1-5 的模板组合。"
-                continue
-            fi
-            RULE_PROFILE="$normalized"
-            log "已选择模板：${RULE_PROFILE}"
-            show_selected_profiles "$RULE_PROFILE"
-            return 0
+    fi
+}
+
+show_rule_table() {
+    local i=""
+    echo ""
+    for i in "${!RULE_FLAGS[@]}"; do
+        local num=$((i + 1))
+        local flag="${RULE_FLAGS[$i]}"
+        local state="${RED}OFF${NC}"
+        if has_word "$SELECTED_RULES" "$flag"; then
+            state="${GREEN}ON ${NC}"
         fi
-        warn "选择无效，请重新输入。示例：2 3 4、2-3-4 或 2-4"
+        printf "  %b%2d)%b [%b] %-16s %b%s%b\n" "$CYAN" "$num" "$NC" "$state" "${RULE_NAMES[$i]}" "$DIM" "${RULE_DESCS[$i]}" "$NC"
     done
 }
 
-manual_rule_name() {
-    case "$1" in
-        1|mail|email|smtp) echo "--block-email" ;;
-        2|http|web) echo "--block-http" ;;
-        3|socks|socks5) echo "--block-socks5" ;;
-        4|fet|tcp-fet) echo "--block-fet-strict" ;;
-        5|wg|wireguard) echo "--block-wireguard" ;;
-        6|quic) echo "--block-quic" ;;
-        7|hy2|hysteria2) echo "--block-hysteria2" ;;
-        8|tuic) echo "--block-tuic" ;;
-        9|udp-fet|udpfet) echo "--block-udp-fet" ;;
-        10|vless|vless-tcp) echo "--block-vless-tcp" ;;
-        11|vmess|vmess-tcp) echo "--block-vmess-tcp" ;;
-        *) return 1 ;;
-    esac
-}
-
-show_manual_rule_menu() {
-    section_title "自定义阻断规则"
-    menu_line "1" "邮件防滥用 Email/SMTP" "阻断 25/26/465/587/2525，防止发信滥用"
-    menu_line "2" "明文 HTTP 入站" "阻断 GET/POST/HEAD/PUT 等明文 HTTP"
-    menu_line "3" "SOCKS 代理" "阻断 SOCKS4 / SOCKS4a / SOCKS5"
-    menu_line "4" "TCP 高熵加密 FET" "覆盖大量弱节点协议，包括 SS/VMess/raw TCP 等"
-    menu_line "5" "WireGuard VPN" "阻断 WireGuard UDP 握手"
-    menu_line "6" "QUIC 总开关" "粗暴阻断可识别 QUIC，HY2/TUIC/HTTP3 会一起挡"
-    menu_line "7" "Hysteria2 / HY2" "尽力阻断 HY2 / 混淆 HY2 / UDP 滥用"
-    menu_line "8" "TUIC" "尽力阻断 TUIC / 非 Web 端口 QUIC 代理"
-    menu_line "9" "UDP 高熵加密 UDP-FET" "阻断加密特征明显的 UDP payload"
-    menu_line "10" "VLESS TCP" "阻断裸 VLESS over TCP"
-    menu_line "11" "VMess TCP" "阻断裸 VMess over TCP"
-    menu_line "0" "返回主菜单"
-    echo ""
-    echo -e "${BOLD}快捷组合：${NC}"
-    echo -e "  ${CYAN}safe${NC}  推荐托管防滥用组合：邮件 + HTTP + SOCKS + TCP-FET + WG + HY2 + TUIC + UDP-FET + VLESS + VMess"
-    echo -e "  ${CYAN}node${NC}  节点协议组合：SOCKS + TCP-FET + WG + QUIC + HY2 + TUIC + UDP-FET + VLESS + VMess"
-    echo -e "  ${CYAN}tcp${NC}   TCP 弱节点组合：SOCKS + TCP-FET + VLESS + VMess"
-    echo -e "  ${CYAN}udp${NC}   UDP 节点组合：WG + QUIC + HY2 + TUIC + UDP-FET"
-    echo -e "  ${CYAN}mail${NC}  只启用邮件防滥用"
-    echo ""
-    echo -e "${DIM}支持批量输入：1 3 6-11、1-3-6、mail node、email socks hy2；输入 all 全选；输入 none 不启用规则。${NC}"
-    echo ""
-}
-
-expand_manual_choice() {
-    local input="${1:-all}"
-    case "$input" in
-        all|全部)
-            echo "1-11"
-            ;;
-        safe|recommended|推荐)
-            echo "1 2 3 4 5 7 8 9 10 11"
-            ;;
-        node|节点)
-            echo "3 4 5 6 7 8 9 10 11"
-            ;;
-        tcp|tcp-node)
-            echo "3 4 10 11"
-            ;;
-        udp|udp-node)
-            echo "5 6 7 8 9"
-            ;;
-        mail|email|smtp|邮件)
-            echo "1"
-            ;;
-        web)
-            echo "2"
-            ;;
-        *)
-            echo "$input"
-            ;;
-    esac
-}
-
-build_manual_rules() {
-    local base_args="$RFW_ARGS"
-
-    if [[ "$NON_INTERACTIVE" == "true" ]]; then
-        append_rule "--block-email"
-        append_rule "--block-http"
-        append_rule "--block-socks5"
-        append_rule "--block-fet-strict"
-        append_rule "--block-wireguard"
-        append_rule "--block-quic"
-        append_rule "--block-hysteria2"
-        append_rule "--block-tuic"
-        append_rule "--block-udp-fet"
-        append_rule "--block-vless-tcp"
-        append_rule "--block-vmess-tcp"
-        return 0
-    fi
-
-    show_manual_rule_menu
+select_rules_menu() {
+    load_current_config
 
     while true; do
-        echo -ne "${BOLD}请选择阻断规则 [默认 all；0 返回]：${NC}"
+        clear 2>/dev/null || true
+        wide_divider
+        echo -e "${BOLD}${CYAN} Incudal-RFW 规则开关管理${NC}"
+        echo -e " ${DIM}输入编号可批量切换，例如：3 7 8、1-4、mail hy2 tuic。${NC}"
+        echo -e " ${DIM}a=全部开启，n=全部关闭，d=恢复推荐，s=保存应用，0=返回主菜单。${NC}"
+        wide_divider
+        show_rule_table
+        wide_divider
+        echo -e " 当前启用：${GREEN}$(rules_to_names "$SELECTED_RULES")${NC}"
+        echo -ne "${BOLD}请输入操作：${NC}"
+
         local choice=""
         local token=""
-        local rule=""
+        local flag=""
         local invalid="false"
         read -r choice || true
-        choice="${choice:-all}"
+        choice="${choice:-}"
 
-        if [[ "$choice" == "0" ]]; then
-            request_menu_back
-            return 0
-        fi
-
-        if [[ "$choice" == "none" ]]; then
-            RFW_ARGS=""
-            warn "你选择了不启用任何阻断规则。"
-            return 0
-        fi
-
-        RFW_ARGS="$base_args"
-        for token in $(expand_selection_tokens "$(expand_manual_choice "$choice")"); do
-            token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
-            local expanded_token=""
-            for expanded_token in $(expand_selection_tokens "$(expand_manual_choice "$token")"); do
-                if rule=$(manual_rule_name "$expanded_token"); then
-                    append_rule "$rule"
-                else
-                    invalid="true"
+        case "$choice" in
+            0)
+                request_menu_back
+                return 0
+                ;;
+            a|A|all|全部)
+                SELECTED_RULES=""
+                for flag in "${RULE_FLAGS[@]}"; do
+                    SELECTED_RULES=$(add_word "$SELECTED_RULES" "$flag")
+                done
+                sanitize_rule_conflicts
+                ;;
+            n|N|none|无)
+                SELECTED_RULES=""
+                ;;
+            d|D|default|推荐)
+                SELECTED_RULES="$DEFAULT_RULES"
+                ;;
+            s|S|save|保存)
+                sanitize_rule_conflicts
+                if has_word "$SELECTED_RULES" "--block-all"; then
+                    if ! confirm "你启用了“全入站阻断”，这会阻断匹配来源的全部入站流量，确认继续？"; then
+                        continue
+                    fi
                 fi
-            done
-        done
-
-        RFW_ARGS="${RFW_ARGS# }"
-        if [[ "$invalid" == "false" ]]; then
-            log "已选择规则：${RFW_ARGS:-<无>}"
-            return 0
-        fi
-        warn "选择无效，请重新输入。示例：1 3 6-11、mail node 或 safe"
+                log "已保存规则选择：$(rules_to_names "$SELECTED_RULES")"
+                return 0
+                ;;
+            "")
+                warn "请输入编号或操作。"
+                sleep 1
+                ;;
+            *)
+                for token in $(expand_selection_tokens "$choice"); do
+                    if flag=$(flag_from_rule_token "$token"); then
+                        toggle_rule "$flag"
+                    else
+                        invalid="true"
+                    fi
+                done
+                if [[ "$invalid" == "true" ]]; then
+                    warn "存在无效输入，请重新检查。"
+                    sleep 1
+                fi
+                ;;
+        esac
     done
-
-    RFW_ARGS="${RFW_ARGS# }"
 }
 
-apply_profile_rules() {
-    local profile="$1"
-    case "$profile" in
-        strong)
-            append_rule "--block-email"
-            append_rule "--block-http"
-            append_rule "--block-socks5"
-            append_rule "--block-fet-strict"
-            append_rule "--block-wireguard"
-            append_rule "--block-quic"
-            append_rule "--block-hysteria2"
-            append_rule "--block-tuic"
-            append_rule "--block-udp-fet"
-            append_rule "--block-vless-tcp"
-            append_rule "--block-vmess-tcp"
-            ;;
-        hy2)
-            append_rule "--block-email"
-            append_rule "--block-socks5"
-            append_rule "--block-fet-strict"
-            append_rule "--block-wireguard"
-            append_rule "--block-hysteria2"
-            append_rule "--block-udp-fet"
-            ;;
-        tuic)
-            append_rule "--block-email"
-            append_rule "--block-socks5"
-            append_rule "--block-wireguard"
-            append_rule "--block-tuic"
-            ;;
-        tcp-node)
-            append_rule "--block-email"
-            append_rule "--block-http"
-            append_rule "--block-socks5"
-            append_rule "--block-fet-strict"
-            append_rule "--block-vless-tcp"
-            append_rule "--block-vmess-tcp"
-            ;;
-        baseline)
-            append_rule "--block-email"
-            append_rule "--block-http"
-            append_rule "--block-socks5"
-            append_rule "--block-fet-strict"
-            append_rule "--block-wireguard"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+reset_install_options() {
+    IFACE=""
+    RFW_ARGS=""
+    BINARY_URL=""
+    RELEASE_URL="$DEFAULT_RELEASE_URL"
+    XDP_MODE="auto"
+    GEO_MODE="blacklist"
+    COUNTRIES="CN"
+    LOG_PORT_ACCESS="true"
+    SELECTED_RULES="$DEFAULT_RULES"
+    CUSTOM_RFW_ARGS="false"
 }
 
-build_default_rules() {
-    if [[ -n "$RFW_ARGS" ]]; then
-        if [[ "$LOG_PORT_ACCESS" == "true" && "$RFW_ARGS" != *"--log-port-access"* ]]; then
-            RFW_ARGS="${RFW_ARGS} --log-port-access"
-        fi
+build_generated_args() {
+    if [[ "$CUSTOM_RFW_ARGS" == "true" ]]; then
+        RFW_ARGS="$(normalize_spaces "$RFW_ARGS")"
+        sync_selected_rules_from_args "$RFW_ARGS"
         return 0
     fi
 
     COUNTRIES=$(printf '%s' "$COUNTRIES" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+    RFW_ARGS="$(normalize_spaces "$SELECTED_RULES")"
 
-    if [[ "$ENABLE_DEFAULT_RULES" != "true" ]]; then
-        RFW_ARGS=""
-    else
-        select_rule_profile
-        is_menu_back && return 0
-        RULE_PROFILE=$(normalize_profile_selection "${RULE_PROFILE:-strong}") || {
-            error "--profile 无效：${RULE_PROFILE}。可选值：strong、hy2、tuic、tcp-node、baseline、manual，也支持逗号分隔组合。"
-            exit 1
-        }
-        if profile_has_manual_mix "$RULE_PROFILE"; then
-            error "--profile 中 manual 不能和其它模板混选。请只用 --profile manual，或只组合 strong/hy2/tuic/tcp-node/baseline。"
-            exit 1
-        fi
-
-        RFW_ARGS=""
-        local profile=""
-        for profile in $RULE_PROFILE; do
-            if [[ "$profile" == "manual" ]]; then
-                build_manual_rules
-                is_menu_back && return 0
-            else
-                apply_profile_rules "$profile" || {
-                    error "--profile 无效：${profile}"
-                    exit 1
-                }
-            fi
-        done
-        RFW_ARGS="${RFW_ARGS# }"
-
-        case "$GEO_MODE" in
-            blacklist)
-                if [[ -n "$COUNTRIES" ]]; then
-                    RFW_ARGS="${RFW_ARGS} --countries ${COUNTRIES}"
-                fi
-                ;;
-            whitelist)
-                if [[ -z "$COUNTRIES" ]]; then
-                    error "--geo-mode whitelist 必须同时指定 --countries。"
-                    exit 1
-                fi
-                RFW_ARGS="${RFW_ARGS} --allow-only-countries ${COUNTRIES}"
-                ;;
-            none)
-                RFW_ARGS="${RFW_ARGS} --all-sources"
-                ;;
-            *)
-                error "--geo-mode 无效：${GEO_MODE}。可选值：blacklist、whitelist、none。"
+    case "$GEO_MODE" in
+        blacklist)
+            [[ -z "$COUNTRIES" ]] && COUNTRIES="CN"
+            RFW_ARGS=$(normalize_spaces "${RFW_ARGS} --countries ${COUNTRIES}")
+            ;;
+        whitelist)
+            if [[ -z "$COUNTRIES" ]]; then
+                error "白名单模式必须指定国家代码。"
                 exit 1
-                ;;
-        esac
-    fi
+            fi
+            RFW_ARGS=$(normalize_spaces "${RFW_ARGS} --allow-only-countries ${COUNTRIES}")
+            ;;
+        none)
+            RFW_ARGS=$(normalize_spaces "${RFW_ARGS} --all-sources")
+            ;;
+        *)
+            error "GeoIP 模式无效：${GEO_MODE}"
+            exit 1
+            ;;
+    esac
 
     if [[ "$LOG_PORT_ACCESS" == "true" && "$RFW_ARGS" != *"--log-port-access"* ]]; then
-        RFW_ARGS="${RFW_ARGS} --log-port-access"
+        RFW_ARGS=$(normalize_spaces "${RFW_ARGS} --log-port-access")
     fi
 }
 
@@ -768,7 +862,7 @@ download_binary() {
     local tmp_file="${RFW_BIN_PATH}.download"
     rm -f "$tmp_file" 2>/dev/null || true
 
-    local attempt
+    local attempt=""
     for attempt in 1 2 3; do
         info "正在下载 RFW 二进制，第 ${attempt} 次尝试：${url}"
         if curl -fL --connect-timeout 15 --max-time 180 "$url" -o "$tmp_file"; then
@@ -792,7 +886,7 @@ write_service() {
 
     cat > "$RFW_SERVICE_FILE" <<EOF
 [Unit]
-Description=RFW 测试防火墙服务
+Description=Incudal-RFW 入站协议阻断服务
 After=network-online.target
 Wants=network-online.target
 
@@ -814,38 +908,36 @@ EOF
 
 show_summary() {
     divider
-    echo -e "${BOLD}RFW 测试部署配置${NC}"
-    echo "  二进制文件：${RFW_BIN_PATH}"
-    echo "  服务文件  ：${RFW_SERVICE_FILE}"
-    echo "  网卡      ：${IFACE}"
-    echo "  XDP 模式  ：${XDP_MODE}"
-    echo "  规则参数  ：${RFW_ARGS:-<无>}"
+    echo -e "${BOLD}Incudal-RFW 当前部署配置${NC}"
+    echo "  二进制文件  ：${RFW_BIN_PATH}"
+    echo "  服务文件    ：${RFW_SERVICE_FILE}"
+    echo "  网卡        ：${IFACE:-未设置}"
+    echo "  XDP 模式    ：${XDP_MODE}"
+    case "$GEO_MODE" in
+        blacklist) echo "  作用范围    ：只阻断 ${COUNTRIES:-CN} 来源" ;;
+        whitelist) echo "  作用范围    ：只允许 ${COUNTRIES:-CN}，其余来源按规则阻断" ;;
+        none) echo "  作用范围    ：所有来源" ;;
+    esac
+    echo "  端口统计    ：$([[ "$LOG_PORT_ACCESS" == "true" ]] && echo 已启用 || echo 未启用)"
+    echo "  启用规则    ：$(rules_to_names "$SELECTED_RULES")"
+    echo "  启动参数    ：${RFW_ARGS:-<无>}"
     divider
 }
 
-install_rfw() {
+install_or_update_rfw() {
     require_root
     require_command curl
     require_command ip
     require_command systemctl
 
-    step "准备 RFW 测试部署"
-
-    if [[ -f "$RFW_BIN_PATH" || -f "$RFW_SERVICE_FILE" ]]; then
-        if ! confirm "检测到 RFW 似乎已经安装，是否重新安装？"; then
-            info "已取消。"
-            return 0
-        fi
-    fi
-
+    step "准备 Incudal-RFW 部署"
     choose_iface
     is_menu_back && return 0
-    build_default_rules
-    is_menu_back && return 0
+    build_generated_args
 
     if [[ "$NON_INTERACTIVE" != "true" && "$FORCE" != "true" ]]; then
         show_summary
-        if ! confirm "确认使用以上配置进行安装？"; then
+        if ! confirm "确认使用以上配置部署/更新 RFW？"; then
             info "已取消。"
             return 0
         fi
@@ -853,12 +945,16 @@ install_rfw() {
 
     stop_existing_service
 
-    local url=""
-    url=$(resolve_binary_url)
-    step "下载二进制文件"
-    download_binary "$url"
+    if [[ ! -x "$RFW_BIN_PATH" || -n "$BINARY_URL" || "$RELEASE_URL" != "$DEFAULT_RELEASE_URL" ]]; then
+        local url=""
+        url=$(resolve_binary_url)
+        step "下载二进制文件"
+        download_binary "$url"
+    else
+        info "检测到已安装二进制，继续复用：${RFW_BIN_PATH}"
+    fi
 
-    step "安装 systemd 服务"
+    step "写入 systemd 服务"
     write_service
 
     step "启动服务"
@@ -867,14 +963,12 @@ install_rfw() {
 
     sleep 2
     if systemctl is-active --quiet "$RFW_SERVICE_NAME"; then
-        log "RFW 服务正在运行。"
+        log "Incudal-RFW 服务正在运行。"
         show_summary
-        echo -e "${DIM}查看实时日志：sudo journalctl -u ${RFW_SERVICE_NAME} -f${NC}"
-        if [[ "$RFW_ARGS" == *"--log-port-access"* ]]; then
-            echo -e "${DIM}查看统计：sudo ${RFW_BIN_PATH} stats${NC}"
-        fi
+        echo -e "${DIM}实时日志：sudo journalctl -u ${RFW_SERVICE_NAME} -f${NC}"
+        [[ "$LOG_PORT_ACCESS" == "true" ]] && echo -e "${DIM}端口统计：sudo ${RFW_BIN_PATH} stats${NC}"
     else
-        error "RFW 服务启动失败。"
+        error "Incudal-RFW 服务启动失败。"
         if [[ "$SHOW_LOGS_ON_FAILURE" == "true" ]]; then
             journalctl -u "$RFW_SERVICE_NAME" -n 80 --no-pager 2>/dev/null || true
         fi
@@ -882,31 +976,57 @@ install_rfw() {
     fi
 }
 
-extract_service_iface() {
-    local service_file=""
-    local exec_start=""
-    local token=""
+deploy_flow() {
+    reset_install_options
+    select_rules_menu
+    if is_menu_back; then MENU_BACK="false"; return 0; fi
+    configure_scope_menu
+    if is_menu_back; then MENU_BACK="false"; return 0; fi
+    configure_runtime_menu
+    if is_menu_back; then MENU_BACK="false"; return 0; fi
+    install_or_update_rfw
+}
 
-    for service_file in "$RFW_SERVICE_FILE" "/usr/lib/systemd/system/${RFW_SERVICE_NAME}.service" "/lib/systemd/system/${RFW_SERVICE_NAME}.service"; do
-        [[ -f "$service_file" ]] || continue
-        exec_start=$(grep '^ExecStart=' "$service_file" 2>/dev/null | sed 's/^ExecStart=//' || true)
-        [[ -n "$exec_start" ]] || continue
-        token=$(printf '%s\n' "$exec_start" | awk '
-            {
-                for (i = 1; i <= NF; i++) {
-                    if ($i == "--iface") {
-                        gsub(/^"/, "", $(i + 1));
-                        gsub(/"$/, "", $(i + 1));
-                        print $(i + 1);
-                        exit
-                    }
-                }
-            }')
-        if [[ -n "$token" ]]; then
-            printf '%s\n' "$token"
-            return 0
-        fi
-    done
+apply_rules_flow() {
+    require_root
+    require_command systemctl
+    require_command ip
+
+    load_current_config
+    select_rules_menu
+    if is_menu_back; then MENU_BACK="false"; return 0; fi
+
+    if [[ ! -x "$RFW_BIN_PATH" || -z "$(extract_exec_start || true)" ]]; then
+        warn "当前还没有完整安装 RFW，将按当前规则执行部署。"
+        choose_iface
+        is_menu_back && return 0
+        build_generated_args
+        install_or_update_rfw
+        return 0
+    fi
+
+    build_generated_args
+    show_summary
+    if ! confirm "确认应用这些规则并重启 RFW？"; then
+        info "已取消。"
+        return 0
+    fi
+
+    step "应用规则并重启服务"
+    write_service
+    systemctl restart "$RFW_SERVICE_NAME"
+    sleep 1
+    if systemctl is-active --quiet "$RFW_SERVICE_NAME"; then
+        log "规则已生效。"
+    else
+        error "服务重启失败。"
+        journalctl -u "$RFW_SERVICE_NAME" -n 80 --no-pager 2>/dev/null || true
+        exit 1
+    fi
+}
+
+extract_service_iface() {
+    extract_arg_after "--iface" || true
 }
 
 detach_xdp_if_possible() {
@@ -933,7 +1053,7 @@ delete_script_copies() {
         return 0
     fi
 
-    step "搜索并删除测试部署脚本"
+    step "搜索并删除部署脚本"
 
     local self_path=""
     local self_dir=""
@@ -960,7 +1080,7 @@ delete_script_copies() {
             else
                 warn "脚本删除失败：${file}"
             fi
-        done < <(find "$root" -maxdepth 4 -type f \( -name 'rfw-test-deploy.sh' -o -name 'incudal-rfw-test-deploy.sh' \) -print0 2>/dev/null)
+        done < <(find "$root" -maxdepth 4 -type f \( -name 'rfw-test-deploy.sh' -o -name 'incudal-rfw-deploy.sh' -o -name 'incudal-rfw-test-deploy.sh' \) -print0 2>/dev/null)
     done
 
     if [[ "$deleted" -eq 0 ]]; then
@@ -973,14 +1093,14 @@ uninstall_rfw() {
     require_command systemctl
 
     if [[ ! -f "$RFW_BIN_PATH" && ! -f "$RFW_SERVICE_FILE" ]]; then
-        warn "当前没有安装 RFW 测试部署。"
-        if confirm "是否仍然搜索并删除测试部署脚本？"; then
+        warn "当前没有安装 Incudal-RFW。"
+        if confirm "是否仍然搜索并删除部署脚本？"; then
             delete_script_copies
         fi
         return 0
     fi
 
-    if ! confirm "确认完整卸载 RFW，并删除服务、二进制、BPF pin 和测试脚本？"; then
+    if ! confirm "确认完整卸载 Incudal-RFW，并删除服务、二进制、BPF pin 和部署脚本？"; then
         info "已取消。"
         return 0
     fi
@@ -999,7 +1119,7 @@ uninstall_rfw() {
     rm -f /run/rfw.pid /var/run/rfw.pid 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     systemctl reset-failed "$RFW_SERVICE_NAME" 2>/dev/null || true
-    log "RFW 服务和文件已清理。"
+    log "Incudal-RFW 服务和文件已清理。"
 
     delete_script_copies
     log "完整卸载流程已完成。"
@@ -1007,30 +1127,38 @@ uninstall_rfw() {
 
 show_status() {
     require_command systemctl
+    load_current_config
 
     divider
-    echo -e "${BOLD}RFW 状态${NC}"
+    echo -e "${BOLD}Incudal-RFW 状态${NC}"
     if [[ -x "$RFW_BIN_PATH" ]]; then
-        echo "  二进制文件：${RFW_BIN_PATH}"
+        echo "  二进制文件  ：${RFW_BIN_PATH}"
     else
-        echo "  二进制文件：未安装"
+        echo "  二进制文件  ：未安装"
     fi
 
     if [[ -f "$RFW_SERVICE_FILE" ]]; then
-        echo "  服务文件  ：${RFW_SERVICE_FILE}"
+        echo "  服务文件    ：${RFW_SERVICE_FILE}"
         local exec_start=""
-        exec_start=$(grep '^ExecStart=' "$RFW_SERVICE_FILE" 2>/dev/null || true)
-        echo "  启动命令  ：${exec_start#ExecStart=}"
+        exec_start=$(extract_exec_start || true)
+        echo "  启动命令    ：${exec_start:-未找到}"
     else
-        echo "  服务文件  ：未安装"
+        echo "  服务文件    ：未安装"
     fi
 
     local status="unknown"
     status=$(systemctl is-active "$RFW_SERVICE_NAME" 2>/dev/null || true)
-    if [[ -z "${status:-}" || "$status" == "unknown" ]]; then
-        status="未知"
-    fi
-    echo "  运行状态  ：${status}"
+    [[ -z "${status:-}" || "$status" == "unknown" ]] && status="未知"
+    echo "  运行状态    ：${status}"
+    echo "  当前网卡    ：${IFACE:-未识别}"
+    echo "  XDP 模式    ：${XDP_MODE:-auto}"
+    case "$GEO_MODE" in
+        blacklist) echo "  作用范围    ：只阻断 ${COUNTRIES:-CN} 来源" ;;
+        whitelist) echo "  作用范围    ：只允许 ${COUNTRIES:-CN}，其余来源按规则阻断" ;;
+        none) echo "  作用范围    ：所有来源" ;;
+    esac
+    echo "  端口统计    ：$([[ "$LOG_PORT_ACCESS" == "true" ]] && echo 已启用 || echo 未启用)"
+    echo "  启用规则    ：$(rules_to_names "$SELECTED_RULES")"
     divider
 }
 
@@ -1048,7 +1176,7 @@ show_block_logs() {
     require_command journalctl
     step "最近的拦截/丢弃日志"
     if ! journalctl -u "$RFW_SERVICE_NAME" -n 500 --no-pager 2>/dev/null | grep -Ei 'block|blocked|drop|deny|reject|阻断|拦截|丢弃|DROP'; then
-        warn "最近日志中没有匹配到明显的拦截记录。可用菜单开启实时日志继续观察。"
+        warn "最近日志中没有匹配到明显的拦截记录。可以打开实时日志继续观察。"
     fi
 }
 
@@ -1059,37 +1187,42 @@ show_stats_menu() {
         return 1
     fi
 
-    echo ""
-    echo -e "${BOLD}端口访问/拦截统计：${NC}"
-    echo -e "  ${CYAN}1)${NC} 查看全部统计"
-    echo -e "  ${CYAN}2)${NC} 只看被阻断的记录"
-    echo -e "  ${CYAN}3)${NC} 按端口分组查看"
-    echo -e "  ${CYAN}4)${NC} 查询指定端口"
-    echo -e "  ${CYAN}5)${NC} 查询指定来源 IP"
-    echo -e "  ${CYAN}0)${NC} 返回"
-    echo ""
-    echo -ne "${BOLD}请选择：${NC}"
+    while true; do
+        section_title "端口访问/拦截统计"
+        menu_line "1" "查看全部统计"
+        menu_line "2" "只看被阻断记录"
+        menu_line "3" "按端口分组"
+        menu_line "4" "查询指定端口"
+        menu_line "5" "查询指定来源 IPv4"
+        menu_line "0" "返回主菜单"
+        echo ""
+        echo -ne "${BOLD}请选择：${NC}"
 
-    local choice=""
-    local port=""
-    local ip=""
-    read -r choice || true
+        local choice=""
+        local port=""
+        local ip=""
+        read -r choice || true
 
-    case "${choice:-1}" in
-        1) "$RFW_BIN_PATH" stats ;;
-        2) "$RFW_BIN_PATH" stats --blocked-only ;;
-        3) "$RFW_BIN_PATH" stats --group-by-port ;;
-        4)
-            port=$(prompt_input "请输入端口号" "")
-            [[ -n "$port" ]] && "$RFW_BIN_PATH" stats --port "$port"
-            ;;
-        5)
-            ip=$(prompt_input "请输入来源 IPv4" "")
-            [[ -n "$ip" ]] && "$RFW_BIN_PATH" stats --ip "$ip"
-            ;;
-        0) return 0 ;;
-        *) warn "选择无效。" ;;
-    esac
+        case "${choice:-1}" in
+            1) "$RFW_BIN_PATH" stats ;;
+            2) "$RFW_BIN_PATH" stats --blocked-only ;;
+            3) "$RFW_BIN_PATH" stats --group-by-port ;;
+            4)
+                port=$(prompt_input "请输入端口号" "")
+                [[ "$port" == "0" ]] && continue
+                [[ -n "$port" ]] && "$RFW_BIN_PATH" stats --port "$port"
+                ;;
+            5)
+                ip=$(prompt_input "请输入来源 IPv4" "")
+                [[ "$ip" == "0" ]] && continue
+                [[ -n "$ip" ]] && "$RFW_BIN_PATH" stats --ip "$ip"
+                ;;
+            0) return 0 ;;
+            *) warn "选择无效。" ;;
+        esac
+        pause_enter
+        clear 2>/dev/null || true
+    done
 }
 
 restart_rfw() {
@@ -1101,140 +1234,12 @@ restart_rfw() {
     show_status
 }
 
-reset_install_options() {
-    IFACE=""
-    RFW_ARGS=""
-    BINARY_URL=""
-    RELEASE_URL="$DEFAULT_RELEASE_URL"
-    XDP_MODE="auto"
-    ENABLE_DEFAULT_RULES="true"
-    COUNTRIES="CN"
-    GEO_MODE="blacklist"
-    LOG_PORT_ACCESS="false"
-    RULE_PROFILE=""
-}
-
-configure_geo_mode_menu() {
-    echo ""
-    echo -e "${BOLD}GeoIP 作用范围：${NC}"
-    echo -e "  ${CYAN}1)${NC} 只阻断指定国家来源 ${DIM}(默认 CN)${NC}"
-    echo -e "  ${CYAN}2)${NC} 只允许指定国家，其余来源按规则阻断"
-    echo -e "  ${CYAN}3)${NC} 不区分国家，对所有来源生效 ${DIM}(测试时慎用)${NC}"
-    echo -e "  ${CYAN}0)${NC} 返回主菜单"
-    echo ""
-    echo -ne "${BOLD}请选择 GeoIP 模式 [1-3，默认 1；0 返回]：${NC}"
-
-    local choice=""
-    read -r choice || true
-    case "${choice:-1}" in
-        0)
-            request_menu_back
-            return 0
-            ;;
-        1)
-            GEO_MODE="blacklist"
-            COUNTRIES=$(prompt_input "请输入国家代码列表" "CN")
-            if [[ "$COUNTRIES" == "0" ]]; then
-                request_menu_back
-                return 0
-            fi
-            ;;
-        2)
-            GEO_MODE="whitelist"
-            COUNTRIES=$(prompt_input "请输入允许的国家代码列表" "CN")
-            if [[ "$COUNTRIES" == "0" ]]; then
-                request_menu_back
-                return 0
-            fi
-            ;;
-        3)
-            GEO_MODE="none"
-            COUNTRIES=""
-            ;;
-        *)
-            warn "选择无效，默认只阻断中国来源。"
-            GEO_MODE="blacklist"
-            COUNTRIES="CN"
-            ;;
-    esac
-}
-
-configure_advanced_menu() {
-    local answer=""
-
-    section_title "高级部署选项"
-    echo -e "${DIM}输入 0 可返回主菜单。${NC}"
-    XDP_MODE=$(prompt_input "XDP 挂载模式 auto/skb/drv/hw" "auto")
-    if [[ "$XDP_MODE" == "0" ]]; then
-        request_menu_back
-        return 0
-    fi
-    case "$XDP_MODE" in
-        auto|skb|drv|driver|hw|hardware) ;;
-        *)
-            warn "XDP 模式无效，自动改为 auto。"
-            XDP_MODE="auto"
-            ;;
-    esac
-
-    if prompt_yes_no "是否启用端口访问/拦截统计？" "yes"; then
-        LOG_PORT_ACCESS="true"
-    else
-        LOG_PORT_ACCESS="false"
-    fi
-
-    if prompt_yes_no "是否自定义二进制或 Release 下载地址？" "no"; then
-        echo -ne "${BOLD}选择下载方式：1) 最新 Release  2) 自定义 Release 基础地址  3) 完整二进制 URL  0) 返回 [默认 1]：${NC}"
-        read -r answer || true
-        case "${answer:-1}" in
-            0)
-                request_menu_back
-                return 0
-                ;;
-            2) RELEASE_URL=$(prompt_input "请输入 Release 基础地址" "$DEFAULT_RELEASE_URL") ;;
-            3) BINARY_URL=$(prompt_input "请输入完整二进制 URL" "") ;;
-            *) RELEASE_URL="$DEFAULT_RELEASE_URL" ;;
-        esac
-        if [[ "$RELEASE_URL" == "0" || "$BINARY_URL" == "0" ]]; then
-            request_menu_back
-            return 0
-        fi
-    fi
-}
-
-configure_menu_install() {
-    local mode="$1"
-    reset_install_options
-
-    choose_iface
-    is_menu_back && return 0
-    configure_geo_mode_menu
-    is_menu_back && return 0
-    configure_advanced_menu
-    is_menu_back && return 0
-
-    case "$mode" in
-        strong|hy2|tuic|tcp-node|baseline)
-            RULE_PROFILE="$mode"
-            ;;
-        profile)
-            select_rule_profile
-            is_menu_back && return 0
-            ;;
-        manual)
-            RULE_PROFILE="manual"
-            ;;
-        raw)
-            ENABLE_DEFAULT_RULES="false"
-            RFW_ARGS=$(prompt_input "请输入完整 RFW 参数" "--block-socks5 --block-fet-strict --block-wireguard --log-port-access")
-            if [[ "$RFW_ARGS" == "0" ]]; then
-                request_menu_back
-                return 0
-            fi
-            ;;
-        *)
-            RULE_PROFILE="strong"
-            ;;
+status_badge() {
+    local state="$1"
+    case "$state" in
+        active) echo -e "${GREEN}运行中${NC}" ;;
+        inactive|failed) echo -e "${RED}${state}${NC}" ;;
+        *) echo -e "${YELLOW}${state:-未知}${NC}" ;;
     esac
 }
 
@@ -1243,6 +1248,8 @@ main_menu() {
 
     while true; do
         clear 2>/dev/null || true
+        load_current_config
+
         local service_state="未知"
         if command -v systemctl >/dev/null 2>&1; then
             service_state=$(systemctl is-active "$RFW_SERVICE_NAME" 2>/dev/null || true)
@@ -1250,21 +1257,26 @@ main_menu() {
         fi
 
         wide_divider
-        echo -e "${BOLD}${CYAN} Incudal RFW 测试部署控制台${NC} ${DIM}v${SCRIPT_VERSION}${NC}"
-        echo -e " ${DIM}默认策略：只阻断中国来源 CN；如需全来源，请在 GeoIP 中显式选择“不区分国家”。${NC}"
-        echo -e " ${DIM}服务状态：${service_state}    安装目录：${RFW_INSTALL_DIR}${NC}"
+        echo -e "${BOLD}${CYAN}                 Incudal-RFW${NC}"
+        echo -e "${MAGENTA}          宿主机入站协议阻断控制台${NC} ${DIM}v${SCRIPT_VERSION}${NC}"
         wide_divider
-        menu_line "1" "快速强力部署" "(所有节点阻断规则，默认只阻断中国来源 CN)"
-        menu_line "2" "批量选择规则模板部署" "(支持 2 3 4 / 2-3-4 / 2-4 / hy2,tuic,tcp-node)"
-        menu_line "3" "批量自定义阻断规则部署" "(支持 mail/node/tcp/udp/safe、1 3 6-11、all)"
-        menu_line "4" "手动输入完整 RFW 参数部署"
-        menu_line "5" "查看服务状态和启动命令"
-        menu_line "6" "查看最近运行日志"
-        menu_line "7" "查看最近拦截日志"
-        menu_line "8" "实时跟踪日志"
-        menu_line "9" "查看端口访问/拦截统计"
-        menu_line "10" "重启 RFW 服务"
-        menu_line "11" "完整卸载并删除脚本"
+        echo -e " 服务状态：$(status_badge "$service_state")   网卡：${BOLD}${IFACE:-未设置}${NC}   安装目录：${RFW_INSTALL_DIR}"
+        case "$GEO_MODE" in
+            blacklist) echo -e " 作用范围：${BOLD}只阻断 ${COUNTRIES:-CN} 来源${NC}   端口统计：${BOLD}$([[ "$LOG_PORT_ACCESS" == "true" ]] && echo 已启用 || echo 未启用)${NC}" ;;
+            whitelist) echo -e " 作用范围：${BOLD}只允许 ${COUNTRIES:-CN}${NC}   端口统计：${BOLD}$([[ "$LOG_PORT_ACCESS" == "true" ]] && echo 已启用 || echo 未启用)${NC}" ;;
+            none) echo -e " 作用范围：${BOLD}所有来源${NC}   端口统计：${BOLD}$([[ "$LOG_PORT_ACCESS" == "true" ]] && echo 已启用 || echo 未启用)${NC}" ;;
+        esac
+        echo -e " 启用规则：${GREEN}$(rules_to_names "$SELECTED_RULES")${NC}"
+        wide_divider
+        menu_line "1" "安装 / 重新部署" "下载正式 Release，并按自选规则启动"
+        menu_line "2" "规则开关管理" "随时启用/关闭规则，保存后自动重启生效"
+        menu_line "3" "查看当前配置"
+        menu_line "4" "查看最近运行日志"
+        menu_line "5" "查看最近拦截日志"
+        menu_line "6" "实时跟踪日志"
+        menu_line "7" "查看端口访问/拦截统计"
+        menu_line "8" "重启 RFW 服务"
+        menu_line "9" "完整卸载并删除脚本"
         menu_line "0" "退出"
         wide_divider
         echo -ne "${BOLD}请选择操作：${NC}"
@@ -1273,64 +1285,38 @@ main_menu() {
         read -r choice || true
         case "${choice:-}" in
             1)
-                reset_install_options
-                RULE_PROFILE="strong"
-                GEO_MODE="blacklist"
-                COUNTRIES="CN"
-                LOG_PORT_ACCESS="true"
-                choose_iface
-                if is_menu_back; then MENU_BACK="false"; continue; fi
-                configure_advanced_menu
-                if is_menu_back; then MENU_BACK="false"; continue; fi
-                install_rfw
+                deploy_flow
                 if is_menu_back; then MENU_BACK="false"; continue; fi
                 pause_enter
                 ;;
             2)
-                configure_menu_install "profile"
-                if is_menu_back; then MENU_BACK="false"; continue; fi
-                install_rfw
+                apply_rules_flow
                 if is_menu_back; then MENU_BACK="false"; continue; fi
                 pause_enter
                 ;;
             3)
-                configure_menu_install "manual"
-                if is_menu_back; then MENU_BACK="false"; continue; fi
-                install_rfw
-                if is_menu_back; then MENU_BACK="false"; continue; fi
-                pause_enter
-                ;;
-            4)
-                configure_menu_install "raw"
-                if is_menu_back; then MENU_BACK="false"; continue; fi
-                install_rfw
-                if is_menu_back; then MENU_BACK="false"; continue; fi
-                pause_enter
-                ;;
-            5)
                 show_status
                 pause_enter
                 ;;
-            6)
+            4)
                 show_logs "recent"
                 pause_enter
                 ;;
-            7)
+            5)
                 show_block_logs
                 pause_enter
                 ;;
-            8)
+            6)
                 show_logs "follow"
                 ;;
-            9)
+            7)
                 show_stats_menu || true
-                pause_enter
                 ;;
-            10)
+            8)
                 restart_rfw
                 pause_enter
                 ;;
-            11)
+            9)
                 uninstall_rfw
                 exit 0
                 ;;
@@ -1345,10 +1331,59 @@ main_menu() {
     done
 }
 
+rules_from_profile_compat() {
+    local profile="$1"
+    local token=""
+    local result=""
+    local flag=""
+    profile=${profile//,/ }
+    for token in $profile; do
+        case "$token" in
+            strong|all)
+                for flag in --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --block-quic --block-hysteria2 --block-tuic --block-udp-fet --block-vless-tcp --block-vmess-tcp; do
+                    result=$(add_word "$result" "$flag")
+                done
+                ;;
+            hy2)
+                for flag in --block-email --block-socks5 --block-fet-strict --block-wireguard --block-hysteria2 --block-udp-fet; do
+                    result=$(add_word "$result" "$flag")
+                done
+                ;;
+            tuic)
+                for flag in --block-email --block-socks5 --block-wireguard --block-tuic; do
+                    result=$(add_word "$result" "$flag")
+                done
+                ;;
+            tcp-node|tcp)
+                for flag in --block-email --block-http --block-socks5 --block-fet-strict --block-vless-tcp --block-vmess-tcp; do
+                    result=$(add_word "$result" "$flag")
+                done
+                ;;
+            baseline)
+                for flag in --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard; do
+                    result=$(add_word "$result" "$flag")
+                done
+                ;;
+            manual)
+                for flag in $DEFAULT_RULES; do
+                    result=$(add_word "$result" "$flag")
+                done
+                ;;
+            *)
+                error "--profile 兼容参数无效：${token}"
+                exit 1
+                ;;
+        esac
+    done
+    printf '%s\n' "$(normalize_spaces "$result")"
+}
+
 parse_args() {
     if [[ $# -gt 0 ]]; then
         ACTION="install"
     fi
+
+    SELECTED_RULES="$DEFAULT_RULES"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1356,6 +1391,8 @@ parse_args() {
                 ACTION="menu"; shift ;;
             --install)
                 ACTION="install"; shift ;;
+            --apply-rules)
+                ACTION="apply-rules"; shift ;;
             --iface)
                 require_arg_value "$1" "${2:-}"
                 IFACE="$2"; shift 2 ;;
@@ -1366,13 +1403,14 @@ parse_args() {
                 require_arg_value "$1" "${2:-}"
                 RELEASE_URL="$2"; shift 2 ;;
             --rules)
-                require_arg_value "$1" "${2:-}"
-                RFW_ARGS="$2"; ENABLE_DEFAULT_RULES="false"; shift 2 ;;
-            --no-default-rules)
-                ENABLE_DEFAULT_RULES="false"; shift ;;
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    error "--rules 缺少参数值"
+                    exit 1
+                fi
+                RFW_ARGS="$2"; CUSTOM_RFW_ARGS="true"; shift 2 ;;
             --profile)
                 require_arg_value "$1" "${2:-}"
-                RULE_PROFILE="$2"; shift 2 ;;
+                SELECTED_RULES=$(rules_from_profile_compat "$2"); shift 2 ;;
             --countries)
                 require_arg_value "$1" "${2:-}"
                 COUNTRIES="$2"; shift 2 ;;
@@ -1381,6 +1419,8 @@ parse_args() {
                 GEO_MODE="$2"; shift 2 ;;
             --log-port-access)
                 LOG_PORT_ACCESS="true"; shift ;;
+            --no-log-port-access)
+                LOG_PORT_ACCESS="false"; shift ;;
             --xdp-mode)
                 require_arg_value "$1" "${2:-}"
                 XDP_MODE="$2"; shift 2 ;;
@@ -1422,14 +1462,6 @@ parse_args() {
             ;;
     esac
 
-    case "$RULE_PROFILE" in
-        ""|strong|hy2|tuic|tcp-node|baseline|manual) ;;
-        *)
-            error "--profile 无效：${RULE_PROFILE}"
-            exit 1
-            ;;
-    esac
-
     case "$GEO_MODE" in
         blacklist|whitelist|none) ;;
         *)
@@ -1446,7 +1478,12 @@ main() {
         menu)
             main_menu ;;
         install)
-            install_rfw ;;
+            require_root
+            require_command ip
+            install_or_update_rfw
+            ;;
+        apply-rules)
+            apply_rules_flow ;;
         uninstall)
             uninstall_rfw ;;
         status)
