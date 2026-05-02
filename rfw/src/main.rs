@@ -292,23 +292,29 @@ struct RunOpt {
     ///
     /// 指定要过滤的国家,与协议规则配合使用
     /// 例如: --countries CN,RU --block-http
-    /// 不指定则协议规则应用于所有流量
-    #[clap(long, value_delimiter = ',')]
+    /// 不指定时默认只对中国来源 CN 生效；如需所有来源，请显式使用 --all-sources
+    #[clap(long, value_delimiter = ',', conflicts_with_all = ["allow_only_countries", "block_all_from", "all_sources"])]
     countries: Vec<String>,
+
+    /// 对所有来源应用协议规则
+    ///
+    /// 默认不启用。RFW 默认只对中国来源 CN 应用协议规则。
+    #[clap(long, conflicts_with_all = ["countries", "allow_only_countries", "block_all_from"])]
+    all_sources: bool,
 
     /// 白名单国家代码列表(逗号分隔)
     ///
     /// 只允许来自这些国家的流量,阻止其他所有国家
     /// 例如: --allow-only-countries US,JP,KR
     /// 与 --countries 互斥
-    #[clap(long, value_delimiter = ',', conflicts_with_all = ["countries", "block_all_from"])]
+    #[clap(long, value_delimiter = ',', conflicts_with_all = ["countries", "block_all_from", "all_sources"])]
     allow_only_countries: Vec<String>,
 
     /// 快捷方式: 阻止指定国家的所有入站流量
     ///
     /// 等价于: --countries X --block-all
     /// 例如: --block-all-from CN,RU
-    #[clap(long, value_delimiter = ',', conflicts_with_all = ["countries", "allow_only_countries"])]
+    #[clap(long, value_delimiter = ',', conflicts_with_all = ["countries", "allow_only_countries", "all_sources"])]
     block_all_from: Vec<String>,
 
     /// 屏蔽发送邮件流量
@@ -483,6 +489,22 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
         opt.block_all,
     );
 
+    let has_filter_rule = opt.block_email
+        || opt_http
+        || opt_socks5
+        || opt_fet_strict
+        || opt_fet_loose
+        || opt_wg
+        || opt_quic
+        || opt_hysteria2
+        || opt_tuic
+        || opt_udp_fet
+        || opt_vless_tcp
+        || opt_vmess_tcp
+        || opt_all
+        || !opt.block_all_from.is_empty()
+        || !opt.allow_only_countries.is_empty();
+
     // 处理国家列表配置
     let mut target_countries = Vec::new();
     let mut whitelist_mode = false;
@@ -495,26 +517,18 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
         target_countries = opt.allow_only_countries.clone();
         whitelist_mode = true;
         info!("使用白名单模式: 仅允许来自 {:?} 的流量", target_countries);
+    } else if opt.all_sources {
+        info!("GeoIP 过滤已关闭: 协议规则将应用于所有来源");
     } else if !opt.countries.is_empty() {
         target_countries = opt.countries.clone();
         info!("GeoIP 过滤国家: {:?}", target_countries);
+    } else if has_filter_rule {
+        target_countries = vec!["CN".to_string()];
+        info!("未指定 GeoIP 范围，默认只对中国来源 CN 应用规则");
     }
 
     // 检查是否至少启用了一个规则
-    if !opt.block_email
-        && !opt_http
-        && !opt_socks5
-        && !opt_fet_strict
-        && !opt_fet_loose
-        && !opt_wg
-        && !opt_quic
-        && !opt_hysteria2
-        && !opt_tuic
-        && !opt_udp_fet
-        && !opt_vless_tcp
-        && !opt_vmess_tcp
-        && !opt_all
-    {
+    if !has_filter_rule {
         println!("警告: 未启用任何防火墙规则，程序将运行但不执行任何过滤操作");
         println!("使用 'rfw --help' 查看可用规则列表");
     }

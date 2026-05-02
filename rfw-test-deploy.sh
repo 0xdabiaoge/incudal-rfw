@@ -375,6 +375,7 @@ build_default_rules() {
                 RFW_ARGS="${RFW_ARGS} --allow-only-countries ${COUNTRIES}"
                 ;;
             none)
+                RFW_ARGS="${RFW_ARGS} --all-sources"
                 ;;
             *)
                 error "--geo-mode 无效：${GEO_MODE}。可选值：blacklist、whitelist、none。"
@@ -950,7 +951,7 @@ main_menu() {
                 ;;
             11)
                 uninstall_rfw
-                pause_enter
+                exit 0
                 ;;
             0)
                 exit 0

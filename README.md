@@ -69,9 +69,11 @@ Incudal RFW 是一个面向 Linux 宿主机的 IPv4 入站防火墙，基于 eBP
 --countries CN,RU              # 黑名单模式：只对这些国家来源应用规则
 --allow-only-countries US,JP   # 白名单模式：只允许这些国家，其余来源按规则阻断
 --block-all-from CN,RU         # 快捷模式：阻断指定国家所有入站 IPv4 流量
+--all-sources                  # 显式关闭默认 GeoIP 范围，对所有来源应用协议规则
 ```
 
-如果不指定 GeoIP 参数，协议规则会作用于所有来源。
+如果不指定 GeoIP 参数，RFW 默认只对中国来源 `CN` 应用协议规则。只有显式指定
+`--all-sources` 时，协议规则才会作用于所有来源。
 
 ### 其他参数
 
@@ -201,11 +203,14 @@ sudo bash rfw-test-deploy.sh --restart
 sudo bash rfw-test-deploy.sh --uninstall
 ```
 
-注意：默认规则会附加 `--countries CN`。如果要测试所有来源都被拦截，请使用：
+注意：默认规则会附加 `--countries CN`。如果要测试所有来源都被拦截，请在脚本中选择
+“不区分国家”，或者命令行使用：
 
 ```bash
 --geo-mode none
 ```
+
+脚本会把 `--geo-mode none` 转换为 RFW 的 `--all-sources` 参数。
 
 ## 编译
 
