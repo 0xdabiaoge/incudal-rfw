@@ -1241,12 +1241,11 @@ fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
     }
 
     // Verifier 要求这种形式：直接比较指针，不能先减法
-    let ptr = start + offset;
-    if ptr + len > end {
+    if start + offset + len > end {
         return Err(());
     }
 
-    Ok(ptr as *const T)
+    Ok((start + offset) as *const T)
 }
 
 #[cfg(not(test))]

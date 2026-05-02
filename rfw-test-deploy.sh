@@ -841,8 +841,11 @@ stop_existing_service() {
         info "正在停止已有 ${RFW_SERVICE_NAME} 服务..."
         systemctl stop "$RFW_SERVICE_NAME" 2>/dev/null || true
         systemctl disable "$RFW_SERVICE_NAME" 2>/dev/null || true
+        systemctl reset-failed "$RFW_SERVICE_NAME" 2>/dev/null || true
     fi
+    detach_xdp_if_possible
     cleanup_bpf_pin
+    sleep 1
 }
 
 cleanup_bpf_pin() {
@@ -850,6 +853,78 @@ cleanup_bpf_pin() {
         rm -f /sys/fs/bpf/rfw_port_access_log 2>/dev/null || true
         info "已清理旧的端口统计 BPF pin。"
     fi
+}
+
+detach_xdp_from_iface() {
+    local iface="${1:-}"
+    [[ -n "$iface" ]] || return 0
+    command -v ip >/dev/null 2>&1 || return 0
+    ip link show "$iface" >/dev/null 2>&1 || return 0
+
+    ip link set dev "$iface" xdp off 2>/dev/null || true
+    ip link set dev "$iface" xdpgeneric off 2>/dev/null || true
+    ip link set dev "$iface" xdpdrv off 2>/dev/null || true
+    ip link set dev "$iface" xdpoffload off 2>/dev/null || true
+}
+
+detach_xdp_if_possible() {
+    local iface="${1:-}"
+    [[ -z "$iface" ]] && iface=$(extract_service_iface || true)
+    detach_xdp_from_iface "$iface"
+}
+
+is_xdp_attached() {
+    local iface="${1:-}"
+    [[ -n "$iface" ]] || return 1
+    command -v ip >/dev/null 2>&1 || return 1
+    ip -details link show "$iface" 2>/dev/null | grep -qi 'xdp'
+}
+
+show_service_diagnostics() {
+    echo ""
+    systemctl show "$RFW_SERVICE_NAME" \
+        -p ActiveState -p SubState -p NRestarts -p ExecMainPID -p Result \
+        --no-pager 2>/dev/null || true
+    echo ""
+    journalctl -u "$RFW_SERVICE_NAME" -n "${1:-80}" --no-pager 2>/dev/null || true
+}
+
+start_rfw_and_wait() {
+    local timeout="${1:-30}"
+    local elapsed=0
+    local state=""
+    local substate=""
+    local iface="${IFACE:-}"
+
+    systemctl reset-failed "$RFW_SERVICE_NAME" 2>/dev/null || true
+    detach_xdp_if_possible "$iface"
+    cleanup_bpf_pin
+
+    systemctl start "$RFW_SERVICE_NAME" 2>/dev/null || true
+
+    while (( elapsed < timeout )); do
+        state=$(systemctl is-active "$RFW_SERVICE_NAME" 2>/dev/null || true)
+        substate=$(systemctl show "$RFW_SERVICE_NAME" -p SubState --value 2>/dev/null || true)
+
+        if [[ "$state" == "active" ]]; then
+            if [[ -z "$iface" ]] || is_xdp_attached "$iface"; then
+                return 0
+            fi
+        fi
+
+        if [[ "$state" == "failed" || "$substate" == "auto-restart" ]]; then
+            sleep 2
+        else
+            sleep 1
+        fi
+        elapsed=$((elapsed + 1))
+    done
+
+    systemctl stop "$RFW_SERVICE_NAME" 2>/dev/null || true
+    systemctl reset-failed "$RFW_SERVICE_NAME" 2>/dev/null || true
+    detach_xdp_if_possible "$iface"
+    cleanup_bpf_pin
+    return 1
 }
 
 download_binary() {
@@ -886,14 +961,18 @@ write_service() {
 Description=Incudal-RFW 入站协议阻断服务
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=30
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=root
 Environment=RUST_LOG=info
+Environment=RFW_IFACE=$(systemd_escape_arg "$IFACE")
+ExecStartPre=-/bin/sh -c 'ip link set dev "$RFW_IFACE" xdp off 2>/dev/null || true; ip link set dev "$RFW_IFACE" xdpgeneric off 2>/dev/null || true; ip link set dev "$RFW_IFACE" xdpdrv off 2>/dev/null || true; ip link set dev "$RFW_IFACE" xdpoffload off 2>/dev/null || true; rm -f /sys/fs/bpf/rfw_port_access_log 2>/dev/null || true'
 ExecStart=${exec_start}
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
@@ -951,11 +1030,9 @@ install_or_update_rfw() {
     write_service
 
     step "启动服务"
-    systemctl start "$RFW_SERVICE_NAME"
     systemctl enable "$RFW_SERVICE_NAME" >/dev/null 2>&1 || true
 
-    sleep 2
-    if systemctl is-active --quiet "$RFW_SERVICE_NAME"; then
+    if start_rfw_and_wait 35; then
         log "Incudal-RFW 服务正在运行。"
         show_summary
         echo -e "${DIM}实时日志：sudo journalctl -u ${RFW_SERVICE_NAME} -f${NC}"
@@ -963,7 +1040,7 @@ install_or_update_rfw() {
     else
         error "Incudal-RFW 服务启动失败。"
         if [[ "$SHOW_LOGS_ON_FAILURE" == "true" ]]; then
-            journalctl -u "$RFW_SERVICE_NAME" -n 80 --no-pager 2>/dev/null || true
+            show_service_diagnostics 100
         fi
         exit 1
     fi
@@ -1012,29 +1089,21 @@ apply_rules_flow() {
 
     step "应用规则并重启服务"
     systemctl stop "$RFW_SERVICE_NAME" 2>/dev/null || true
+    systemctl reset-failed "$RFW_SERVICE_NAME" 2>/dev/null || true
+    detach_xdp_if_possible "${IFACE:-}"
     cleanup_bpf_pin
     write_service
-    systemctl start "$RFW_SERVICE_NAME"
-    sleep 1
-    if systemctl is-active --quiet "$RFW_SERVICE_NAME"; then
+    if start_rfw_and_wait 35; then
         log "规则已生效。"
     else
         error "服务重启失败。"
-        journalctl -u "$RFW_SERVICE_NAME" -n 80 --no-pager 2>/dev/null || true
+        show_service_diagnostics 100
         exit 1
     fi
 }
 
 extract_service_iface() {
     extract_arg_after "--iface" || true
-}
-
-detach_xdp_if_possible() {
-    local iface=""
-    iface=$(extract_service_iface || true)
-    if [[ -n "$iface" ]] && command -v ip >/dev/null 2>&1 && ip link show "$iface" >/dev/null 2>&1; then
-        ip link set dev "$iface" xdp off 2>/dev/null || true
-    fi
 }
 
 resolve_self_path() {
@@ -1230,10 +1299,17 @@ restart_rfw() {
     require_command systemctl
     step "重启 RFW 服务"
     systemctl stop "$RFW_SERVICE_NAME" 2>/dev/null || true
+    systemctl reset-failed "$RFW_SERVICE_NAME" 2>/dev/null || true
+    detach_xdp_if_possible "${IFACE:-}"
     cleanup_bpf_pin
-    systemctl start "$RFW_SERVICE_NAME"
-    sleep 1
-    show_status
+    if start_rfw_and_wait 35; then
+        log "RFW 服务已成功重启。"
+        show_status
+    else
+        error "RFW 服务重启失败。"
+        show_service_diagnostics 100
+        return 1
+    fi
 }
 
 status_badge() {
