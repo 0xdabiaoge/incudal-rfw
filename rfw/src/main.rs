@@ -381,33 +381,33 @@ struct RunOpt {
     #[clap(long)]
     block_quic: bool,
 
-    /// Block Hysteria2/HY2 inbound traffic (best-effort)
+    /// 尽力阻断 Hysteria2/HY2 入站流量
     ///
-    /// Targets standard QUIC proxy traffic on non-web ports and obfuscated UDP high-entropy traffic.
+    /// 主要针对非 Web 端口上的 QUIC 代理流量，以及混淆后的 UDP 高熵流量。
     #[clap(long)]
     block_hysteria2: bool,
 
-    /// Block TUIC inbound traffic (best-effort)
+    /// 尽力阻断 TUIC 入站流量
     ///
-    /// Targets standard QUIC proxy traffic, especially non-web QUIC service ports.
+    /// 主要针对 QUIC 代理流量，尤其是非 Web 端口上的 QUIC 服务。
     #[clap(long)]
     block_tuic: bool,
 
-    /// Block UDP fully encrypted traffic
+    /// 阻断 UDP 全加密高熵流量
     ///
-    /// Generic UDP high-entropy encrypted traffic rule, useful for obfuscated UDP proxy protocols.
+    /// 通用 UDP 高熵加密流量规则，可用于拦截混淆型 UDP 代理协议。
     #[clap(long)]
     block_udp_fet: bool,
 
-    /// Block raw VLESS over TCP inbound traffic (best-effort)
+    /// 尽力阻断裸 VLESS over TCP 入站流量
     ///
-    /// Targets VLESS without TLS/Reality/WS/gRPC outer transport.
+    /// 主要针对没有 TLS/Reality/WS/gRPC 外层传输的 VLESS。
     #[clap(long)]
     block_vless_tcp: bool,
 
-    /// Block raw VMess over TCP inbound traffic
+    /// 阻断裸 VMess over TCP 入站流量
     ///
-    /// Uses TCP encrypted-traffic detection as a dedicated VMess/raw-TCP switch.
+    /// 使用 TCP 高熵加密流量检测，作为 VMess/raw-TCP 专用开关。
     #[clap(long)]
     block_vmess_tcp: bool,
 
@@ -541,7 +541,7 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
     match aya_log::EbpfLogger::init(&mut ebpf) {
         Err(e) => {
             // This can happen if you remove all log statements from your eBPF program.
-            warn!("failed to initialize eBPF logger: {e}");
+            warn!("初始化 eBPF 日志失败: {e}");
         }
         Ok(logger) => {
             let mut logger =
@@ -644,7 +644,7 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
         } else {
             format!("{:?} 国家", target_countries)
         };
-        info!("启用规则: 屏蔽 {} 的 Hysteria2/HY2 入站 (best-effort)", scope);
+        info!("启用规则: 尽力屏蔽 {} 的 Hysteria2/HY2 入站", scope);
     }
 
     if opt_tuic {
@@ -654,7 +654,7 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
         } else {
             format!("{:?} 国家", target_countries)
         };
-        info!("启用规则: 屏蔽 {} 的 TUIC 入站 (best-effort)", scope);
+        info!("启用规则: 尽力屏蔽 {} 的 TUIC 入站", scope);
     }
 
     if opt_udp_fet {
@@ -674,7 +674,7 @@ async fn run_firewall(opt: RunOpt) -> anyhow::Result<()> {
         } else {
             format!("{:?} 国家", target_countries)
         };
-        info!("启用规则: 屏蔽 {} 的 VLESS TCP 入站 (best-effort)", scope);
+        info!("启用规则: 尽力屏蔽 {} 的 VLESS TCP 入站", scope);
     }
 
     if opt_vmess_tcp {

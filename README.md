@@ -272,7 +272,7 @@ https://github.com/0xdabiaoge/incudal-rfw/releases/latest/download
 - 当前只解析 IPv4，不处理 IPv6。
 - 检测方式是 XDP 单包 DPI + 轻量连接跟踪，不做完整 TCP 流重组。
 - `--block-quic` 会阻断所有可识别 QUIC，可能影响正常 HTTP/3。
-- HY2 / TUIC 拆分属于 best-effort，因为二者都基于 QUIC，应用层内容加密。
+- HY2 / TUIC 拆分属于尽力识别，因为二者都基于 QUIC，应用层内容加密。
 - `--block-udp-fet` 不会阻断全部 UDP，只阻断高熵加密特征明显的 UDP payload。
 - VLESS / VMess TCP 规则主要针对裸 TCP 版本；如果套 TLS、Reality、WS、gRPC，
   需要进一步做外层协议/行为检测。
@@ -294,7 +294,7 @@ https://github.com/Loyalsoldier/geoip
 同时感谢 Aya 生态对 Rust eBPF 开发的支持，以及 GeoIP 数据源项目提供的国家
 IP 段数据。
 
-## License
+## 许可证
 
 本项目保留原有授权结构：
 

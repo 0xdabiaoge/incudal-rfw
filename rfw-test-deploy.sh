@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================================
-# RFW test deployment script
+# RFW 测试部署脚本
 #
-# This script mirrors the RFW deployment path used by the Incudal host installer:
-# download a prebuilt GitHub Release binary, install it under /root/rfw, create a
-# systemd service, and start RFW on the selected host interface.
+# 本脚本用于复刻 Incudal 宿主机安装器的 RFW 部署路径：
+# 从 GitHub Release 下载预编译二进制，安装到 /root/rfw，写入 systemd
+# 服务，并在选定网卡上启动 RFW。
 # ============================================================================
 set -euo pipefail
 
-readonly SCRIPT_VERSION="0.1.0"
+readonly SCRIPT_VERSION="0.1.1"
 readonly DEFAULT_RELEASE_URL="https://github.com/0xdabiaoge/incudal-rfw/releases/latest/download"
 readonly RFW_INSTALL_DIR="/root/rfw"
 readonly RFW_BIN_PATH="${RFW_INSTALL_DIR}/rfw"
@@ -51,39 +51,39 @@ divider() {
 
 usage() {
     cat <<EOF
-RFW test deployment script v${SCRIPT_VERSION}
+RFW 测试部署脚本 v${SCRIPT_VERSION}
 
-Usage:
-  sudo bash rfw-test-deploy.sh [options]
+用法：
+  sudo bash rfw-test-deploy.sh [参数]
   sudo bash rfw-test-deploy.sh --uninstall
   sudo bash rfw-test-deploy.sh --status
   sudo bash rfw-test-deploy.sh --logs
 
-Install options:
-  --iface <IFACE>             Network interface to attach XDP to.
-  --binary-url <URL>          Download this exact RFW binary.
-  --release-url <URL>         Release download base URL.
-                              Default: ${DEFAULT_RELEASE_URL}
-  --rules "<ARGS>"            Raw RFW rule arguments. Overrides default rules.
-                              Example: --rules "--countries CN --block-http"
-  --no-default-rules          Install with no rule arguments unless --rules is set.
-  --profile <PROFILE>         Rule profile: strong, hy2, tuic, tcp-node, baseline, manual.
-                              Default: strong in --yes mode, interactive otherwise.
-  --countries <LIST>          Country list for default rules. Default: CN.
+安装参数：
+  --iface <网卡名>            指定要挂载 XDP 的网卡。
+  --binary-url <URL>          指定完整的 RFW 二进制下载地址。
+  --release-url <URL>         指定 Release 下载基础地址。
+                              默认：${DEFAULT_RELEASE_URL}
+  --rules "<参数>"            直接传入原始 RFW 规则参数，会覆盖默认规则。
+                              示例：--rules "--countries CN --block-http"
+  --no-default-rules          不生成默认规则；除非同时指定 --rules。
+  --profile <配置>            规则配置：strong、hy2、tuic、tcp-node、baseline、manual。
+                              --yes 模式默认 strong；交互模式会询问。
+  --countries <列表>          默认规则使用的国家代码列表，默认：CN。
   --geo-mode <blacklist|whitelist|none>
-                              Geo mode for default rules. Default: blacklist.
-  --log-port-access           Add --log-port-access to generated rules.
+                              默认规则的 GeoIP 模式，默认：blacklist。
+  --log-port-access           在生成规则中加入 --log-port-access。
   --xdp-mode <auto|skb|drv|hw>
-                              XDP attach mode. Default: auto.
-  --force                     Reinstall without confirmation.
-  --yes                       Non-interactive mode.
+                              XDP 挂载模式，默认：auto。
+  --force                     不再确认，直接重装。
+  --yes                       非交互模式。
 
-Actions:
-  --uninstall                 Stop and remove the RFW test deployment.
-  --status                    Show service status and installed command.
-  --logs                      Show recent systemd logs.
+操作：
+  --uninstall                 停止并移除 RFW 测试部署。
+  --status                    查看服务状态和已安装命令。
+  --logs                      查看最近的 systemd 日志。
 
-Examples:
+示例：
   sudo bash rfw-test-deploy.sh --iface eth0 --yes
   sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2 --geo-mode none
   sudo bash rfw-test-deploy.sh --iface eth0 --xdp-mode skb --log-port-access
@@ -94,7 +94,7 @@ EOF
 
 require_root() {
     if [[ "${EUID}" -ne 0 ]]; then
-        error "Please run as root: sudo bash $0"
+        error "请使用 root 权限运行：sudo bash $0"
         exit 1
     fi
 }
@@ -102,7 +102,7 @@ require_root() {
 require_command() {
     local name="$1"
     if ! command -v "$name" >/dev/null 2>&1; then
-        error "Missing required command: ${name}"
+        error "缺少必要命令：${name}"
         exit 1
     fi
 }
@@ -111,7 +111,7 @@ require_arg_value() {
     local flag="$1"
     local value="${2:-}"
     if [[ -z "$value" || "$value" == --* ]]; then
-        error "Missing value for ${flag}"
+        error "${flag} 缺少参数值"
         exit 1
     fi
 }
@@ -130,7 +130,7 @@ confirm() {
     echo -ne "${YELLOW}${prompt}${NC} [y/N]: "
     local answer=""
     read -r answer || true
-    [[ "${answer:-}" =~ ^[yY]$ ]]
+    [[ "${answer:-}" =~ ^([yY]|[yY][eE][sS]|是)$ ]]
 }
 
 detect_arch_suffix() {
@@ -142,7 +142,7 @@ detect_arch_suffix() {
             echo "aarch64"
             ;;
         *)
-            error "Unsupported architecture: $(uname -m). Supported: x86_64, aarch64."
+            error "不支持当前架构：$(uname -m)。目前支持：x86_64、aarch64。"
             exit 1
             ;;
     esac
@@ -151,7 +151,7 @@ detect_arch_suffix() {
 choose_iface() {
     if [[ -n "$IFACE" ]]; then
         if ! ip link show "$IFACE" >/dev/null 2>&1; then
-            error "Network interface does not exist: ${IFACE}"
+            error "网卡不存在：${IFACE}"
             exit 1
         fi
         return 0
@@ -161,7 +161,7 @@ choose_iface() {
     default_iface=$(ip route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i=="dev") print $(i+1)}' | head -n1 || true)
     if [[ -n "$default_iface" && "$NON_INTERACTIVE" == "true" ]]; then
         IFACE="$default_iface"
-        info "Using default route interface: ${IFACE}"
+        info "使用默认路由网卡：${IFACE}"
         return 0
     fi
 
@@ -172,22 +172,22 @@ choose_iface() {
     done < <(ip -o link show | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep -v '^lo$')
 
     if [[ "${#interfaces[@]}" -eq 0 ]]; then
-        error "No usable network interface found."
+        error "没有找到可用网卡。"
         exit 1
     fi
 
     if [[ "${#interfaces[@]}" -eq 1 ]]; then
         IFACE="${interfaces[0]}"
-        info "Only one interface found, using: ${IFACE}"
+        info "只找到一个可用网卡，自动使用：${IFACE}"
         return 0
     fi
 
     if [[ -n "$default_iface" ]]; then
-        echo -e "  ${DIM}Default route interface: ${default_iface}${NC}"
+        echo -e "  ${DIM}默认路由网卡：${default_iface}${NC}"
     fi
 
     echo ""
-    echo "Available network interfaces:"
+    echo "可用网卡："
     local i
     for i in "${!interfaces[@]}"; do
         local num=$((i + 1))
@@ -202,14 +202,14 @@ choose_iface() {
     echo ""
 
     while true; do
-        echo -ne "${BOLD}Select interface [1-${#interfaces[@]}]: ${NC}"
+        echo -ne "${BOLD}请选择网卡 [1-${#interfaces[@]}]：${NC}"
         local choice=""
         read -r choice || true
         if [[ "${choice:-}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#interfaces[@]} )); then
             IFACE="${interfaces[$((choice - 1))]}"
             return 0
         fi
-        warn "Invalid selection."
+        warn "选择无效，请重新输入。"
     done
 }
 
@@ -228,7 +228,7 @@ prompt_yes_no() {
         [[ "$default_answer" == "yes" ]]
         return
     fi
-    [[ "$answer" =~ ^[yY]$ ]]
+    [[ "$answer" =~ ^([yY]|[yY][eE][sS]|是)$ ]]
 }
 
 select_rule_profile() {
@@ -237,17 +237,17 @@ select_rule_profile() {
     fi
 
     echo ""
-    echo -e "${BOLD}Rule profiles:${NC}"
-    echo -e "  ${CYAN}1)${NC} strong   ${DIM}Block QUIC, HY2, TUIC, VLESS, VMess, UDP-FET, SOCKS, WG, HTTP, Email${NC}"
-    echo -e "  ${CYAN}2)${NC} hy2      ${DIM}Focus HY2/obfs HY2 and UDP abuse, less broad than --block-quic${NC}"
-    echo -e "  ${CYAN}3)${NC} tuic     ${DIM}Focus TUIC/QUIC proxy on non-web ports${NC}"
-    echo -e "  ${CYAN}4)${NC} tcp-node ${DIM}Focus VLESS/VMess/SOCKS/FET weak TCP node protocols${NC}"
-    echo -e "  ${CYAN}5)${NC} baseline ${DIM}Original broad node baseline without separated rules${NC}"
-    echo -e "  ${CYAN}6)${NC} manual   ${DIM}Choose every rule interactively${NC}"
+    echo -e "${BOLD}规则配置：${NC}"
+    echo -e "  ${CYAN}1)${NC} strong   ${DIM}强力阻断：QUIC、HY2、TUIC、VLESS、VMess、UDP-FET、SOCKS、WG、HTTP、Email 全开${NC}"
+    echo -e "  ${CYAN}2)${NC} hy2      ${DIM}重点测试 HY2 / 混淆 HY2 / UDP 滥用，比 --block-quic 更克制${NC}"
+    echo -e "  ${CYAN}3)${NC} tuic     ${DIM}重点测试 TUIC / 非 Web 端口 QUIC 代理${NC}"
+    echo -e "  ${CYAN}4)${NC} tcp-node ${DIM}重点测试 VLESS、VMess、SOCKS、FET 这类 TCP 弱节点协议${NC}"
+    echo -e "  ${CYAN}5)${NC} baseline ${DIM}基础节点阻断组合，不启用 HY2/TUIC 拆分规则${NC}"
+    echo -e "  ${CYAN}6)${NC} manual   ${DIM}逐条规则手动选择${NC}"
     echo ""
 
     while true; do
-        echo -ne "${BOLD}Select rule profile [1-6, default 1]: ${NC}"
+        echo -ne "${BOLD}请选择规则配置 [1-6，默认 1]：${NC}"
         local choice=""
         read -r choice || true
         case "${choice:-1}" in
@@ -257,7 +257,7 @@ select_rule_profile() {
             4) RULE_PROFILE="tcp-node"; return 0 ;;
             5) RULE_PROFILE="baseline"; return 0 ;;
             6) RULE_PROFILE="manual"; return 0 ;;
-            *) warn "Invalid selection." ;;
+            *) warn "选择无效，请重新输入。" ;;
         esac
     done
 }
@@ -265,17 +265,17 @@ select_rule_profile() {
 build_manual_rules() {
     RFW_ARGS=""
 
-    prompt_yes_no "Block Email/SMTP abuse?" "yes" && RFW_ARGS="${RFW_ARGS} --block-email"
-    prompt_yes_no "Block HTTP plaintext inbound?" "yes" && RFW_ARGS="${RFW_ARGS} --block-http"
-    prompt_yes_no "Block SOCKS4/SOCKS5 inbound?" "yes" && RFW_ARGS="${RFW_ARGS} --block-socks5"
-    prompt_yes_no "Block TCP fully encrypted traffic, strict FET?" "yes" && RFW_ARGS="${RFW_ARGS} --block-fet-strict"
-    prompt_yes_no "Block WireGuard inbound?" "yes" && RFW_ARGS="${RFW_ARGS} --block-wireguard"
-    prompt_yes_no "Block all identifiable QUIC?" "yes" && RFW_ARGS="${RFW_ARGS} --block-quic"
-    prompt_yes_no "Block Hysteria2/HY2 best-effort?" "yes" && RFW_ARGS="${RFW_ARGS} --block-hysteria2"
-    prompt_yes_no "Block TUIC best-effort?" "yes" && RFW_ARGS="${RFW_ARGS} --block-tuic"
-    prompt_yes_no "Block UDP high-entropy encrypted traffic?" "yes" && RFW_ARGS="${RFW_ARGS} --block-udp-fet"
-    prompt_yes_no "Block raw VLESS over TCP?" "yes" && RFW_ARGS="${RFW_ARGS} --block-vless-tcp"
-    prompt_yes_no "Block raw VMess over TCP?" "yes" && RFW_ARGS="${RFW_ARGS} --block-vmess-tcp"
+    prompt_yes_no "是否阻断 Email/SMTP 发信滥用？" "yes" && RFW_ARGS="${RFW_ARGS} --block-email"
+    prompt_yes_no "是否阻断明文 HTTP 入站？" "yes" && RFW_ARGS="${RFW_ARGS} --block-http"
+    prompt_yes_no "是否阻断 SOCKS4/SOCKS5 入站？" "yes" && RFW_ARGS="${RFW_ARGS} --block-socks5"
+    prompt_yes_no "是否阻断 TCP 全加密高熵流量（严格 FET）？" "yes" && RFW_ARGS="${RFW_ARGS} --block-fet-strict"
+    prompt_yes_no "是否阻断 WireGuard 入站？" "yes" && RFW_ARGS="${RFW_ARGS} --block-wireguard"
+    prompt_yes_no "是否阻断所有可识别 QUIC？" "yes" && RFW_ARGS="${RFW_ARGS} --block-quic"
+    prompt_yes_no "是否尽力阻断 Hysteria2/HY2？" "yes" && RFW_ARGS="${RFW_ARGS} --block-hysteria2"
+    prompt_yes_no "是否尽力阻断 TUIC？" "yes" && RFW_ARGS="${RFW_ARGS} --block-tuic"
+    prompt_yes_no "是否阻断 UDP 高熵加密流量？" "yes" && RFW_ARGS="${RFW_ARGS} --block-udp-fet"
+    prompt_yes_no "是否阻断裸 VLESS over TCP？" "yes" && RFW_ARGS="${RFW_ARGS} --block-vless-tcp"
+    prompt_yes_no "是否阻断裸 VMess over TCP？" "yes" && RFW_ARGS="${RFW_ARGS} --block-vmess-tcp"
 
     RFW_ARGS="${RFW_ARGS# }"
 }
@@ -316,7 +316,7 @@ build_default_rules() {
                 build_manual_rules
                 ;;
             *)
-                error "Invalid --profile: ${RULE_PROFILE}. Expected strong, hy2, tuic, tcp-node, baseline, or manual."
+                error "--profile 无效：${RULE_PROFILE}。可选值：strong、hy2、tuic、tcp-node、baseline、manual。"
                 exit 1
                 ;;
         esac
@@ -329,7 +329,7 @@ build_default_rules() {
                 ;;
             whitelist)
                 if [[ -z "$COUNTRIES" ]]; then
-                    error "--geo-mode whitelist requires --countries."
+                    error "--geo-mode whitelist 必须同时指定 --countries。"
                     exit 1
                 fi
                 RFW_ARGS="${RFW_ARGS} --allow-only-countries ${COUNTRIES}"
@@ -337,7 +337,7 @@ build_default_rules() {
             none)
                 ;;
             *)
-                error "Invalid --geo-mode: ${GEO_MODE}. Expected blacklist, whitelist, or none."
+                error "--geo-mode 无效：${GEO_MODE}。可选值：blacklist、whitelist、none。"
                 exit 1
                 ;;
         esac
@@ -369,7 +369,7 @@ build_exec_start() {
 resolve_binary_url() {
     if [[ -n "$BINARY_URL" ]]; then
         if ! is_http_url "$BINARY_URL"; then
-            error "Invalid --binary-url: ${BINARY_URL}"
+            error "--binary-url 无效：${BINARY_URL}"
             exit 1
         fi
         echo "$BINARY_URL"
@@ -377,7 +377,7 @@ resolve_binary_url() {
     fi
 
     if ! is_http_url "$RELEASE_URL"; then
-        error "Invalid --release-url: ${RELEASE_URL}"
+        error "--release-url 无效：${RELEASE_URL}"
         exit 1
     fi
 
@@ -388,7 +388,7 @@ resolve_binary_url() {
 
 stop_existing_service() {
     if systemctl list-unit-files "${RFW_SERVICE_NAME}.service" --no-legend 2>/dev/null | grep -q "^${RFW_SERVICE_NAME}.service"; then
-        info "Stopping existing ${RFW_SERVICE_NAME} service..."
+        info "正在停止已有 ${RFW_SERVICE_NAME} 服务..."
         systemctl stop "$RFW_SERVICE_NAME" 2>/dev/null || true
         systemctl disable "$RFW_SERVICE_NAME" 2>/dev/null || true
     fi
@@ -403,19 +403,19 @@ download_binary() {
 
     local attempt
     for attempt in 1 2 3; do
-        info "Downloading RFW binary, attempt ${attempt}: ${url}"
+        info "正在下载 RFW 二进制，第 ${attempt} 次尝试：${url}"
         if curl -fL --connect-timeout 15 --max-time 180 "$url" -o "$tmp_file"; then
             mv "$tmp_file" "$RFW_BIN_PATH"
             chmod +x "$RFW_BIN_PATH"
-            log "RFW binary installed to ${RFW_BIN_PATH}"
+            log "RFW 二进制已安装到：${RFW_BIN_PATH}"
             return 0
         fi
-        warn "Download failed on attempt ${attempt}."
+        warn "第 ${attempt} 次下载失败。"
         [[ "$attempt" -lt 3 ]] && sleep 3
     done
 
     rm -f "$tmp_file" 2>/dev/null || true
-    error "Failed to download RFW binary after 3 attempts."
+    error "连续 3 次下载 RFW 二进制失败。"
     exit 1
 }
 
@@ -425,7 +425,7 @@ write_service() {
 
     cat > "$RFW_SERVICE_FILE" <<EOF
 [Unit]
-Description=RFW Test Firewall Service
+Description=RFW 测试防火墙服务
 After=network-online.target
 Wants=network-online.target
 
@@ -442,17 +442,17 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    log "systemd service written to ${RFW_SERVICE_FILE}"
+    log "systemd 服务已写入：${RFW_SERVICE_FILE}"
 }
 
 show_summary() {
     divider
-    echo -e "${BOLD}RFW test deployment${NC}"
-    echo "  Binary : ${RFW_BIN_PATH}"
-    echo "  Service: ${RFW_SERVICE_FILE}"
-    echo "  Iface  : ${IFACE}"
-    echo "  XDP    : ${XDP_MODE}"
-    echo "  Rules  : ${RFW_ARGS:-<none>}"
+    echo -e "${BOLD}RFW 测试部署配置${NC}"
+    echo "  二进制文件：${RFW_BIN_PATH}"
+    echo "  服务文件  ：${RFW_SERVICE_FILE}"
+    echo "  网卡      ：${IFACE}"
+    echo "  XDP 模式  ：${XDP_MODE}"
+    echo "  规则参数  ：${RFW_ARGS:-<无>}"
     divider
 }
 
@@ -462,11 +462,11 @@ install_rfw() {
     require_command ip
     require_command systemctl
 
-    step "Preparing RFW test deployment"
+    step "准备 RFW 测试部署"
 
     if [[ -f "$RFW_BIN_PATH" || -f "$RFW_SERVICE_FILE" ]]; then
-        if ! confirm "RFW appears to be installed. Reinstall?"; then
-            info "Canceled."
+        if ! confirm "检测到 RFW 似乎已经安装，是否重新安装？"; then
+            info "已取消。"
             return 0
         fi
     fi
@@ -476,8 +476,8 @@ install_rfw() {
 
     if [[ "$NON_INTERACTIVE" != "true" && "$FORCE" != "true" ]]; then
         show_summary
-        if ! confirm "Install with this configuration?"; then
-            info "Canceled."
+        if ! confirm "确认使用以上配置进行安装？"; then
+            info "已取消。"
             return 0
         fi
     fi
@@ -486,26 +486,26 @@ install_rfw() {
 
     local url=""
     url=$(resolve_binary_url)
-    step "Downloading binary"
+    step "下载二进制文件"
     download_binary "$url"
 
-    step "Installing service"
+    step "安装 systemd 服务"
     write_service
 
-    step "Starting service"
+    step "启动服务"
     systemctl start "$RFW_SERVICE_NAME"
     systemctl enable "$RFW_SERVICE_NAME" >/dev/null 2>&1 || true
 
     sleep 2
     if systemctl is-active --quiet "$RFW_SERVICE_NAME"; then
-        log "RFW service is running."
+        log "RFW 服务正在运行。"
         show_summary
-        echo -e "${DIM}Logs: sudo journalctl -u ${RFW_SERVICE_NAME} -f${NC}"
+        echo -e "${DIM}查看实时日志：sudo journalctl -u ${RFW_SERVICE_NAME} -f${NC}"
         if [[ "$RFW_ARGS" == *"--log-port-access"* ]]; then
-            echo -e "${DIM}Stats: sudo ${RFW_BIN_PATH} stats${NC}"
+            echo -e "${DIM}查看统计：sudo ${RFW_BIN_PATH} stats${NC}"
         fi
     else
-        error "RFW service failed to start."
+        error "RFW 服务启动失败。"
         if [[ "$SHOW_LOGS_ON_FAILURE" == "true" ]]; then
             journalctl -u "$RFW_SERVICE_NAME" -n 80 --no-pager 2>/dev/null || true
         fi
@@ -518,16 +518,16 @@ uninstall_rfw() {
     require_command systemctl
 
     if [[ ! -f "$RFW_BIN_PATH" && ! -f "$RFW_SERVICE_FILE" ]]; then
-        warn "RFW test deployment is not installed."
+        warn "当前没有安装 RFW 测试部署。"
         return 0
     fi
 
-    if ! confirm "Remove RFW test deployment?"; then
-        info "Canceled."
+    if ! confirm "确认移除 RFW 测试部署？"; then
+        info "已取消。"
         return 0
     fi
 
-    step "Removing RFW test deployment"
+    step "移除 RFW 测试部署"
     systemctl stop "$RFW_SERVICE_NAME" 2>/dev/null || true
     systemctl disable "$RFW_SERVICE_NAME" 2>/dev/null || true
     rm -f "$RFW_SERVICE_FILE" 2>/dev/null || true
@@ -536,32 +536,35 @@ uninstall_rfw() {
     rm -rf "$RFW_INSTALL_DIR" 2>/dev/null || true
     rm -f /sys/fs/bpf/rfw_port_access_log 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    log "RFW test deployment removed."
+    log "RFW 测试部署已移除。"
 }
 
 show_status() {
     require_command systemctl
 
     divider
-    echo -e "${BOLD}RFW status${NC}"
+    echo -e "${BOLD}RFW 状态${NC}"
     if [[ -x "$RFW_BIN_PATH" ]]; then
-        echo "  Binary : ${RFW_BIN_PATH}"
+        echo "  二进制文件：${RFW_BIN_PATH}"
     else
-        echo "  Binary : not installed"
+        echo "  二进制文件：未安装"
     fi
 
     if [[ -f "$RFW_SERVICE_FILE" ]]; then
-        echo "  Service: ${RFW_SERVICE_FILE}"
+        echo "  服务文件  ：${RFW_SERVICE_FILE}"
         local exec_start=""
         exec_start=$(grep '^ExecStart=' "$RFW_SERVICE_FILE" 2>/dev/null || true)
-        echo "  Command: ${exec_start#ExecStart=}"
+        echo "  启动命令  ：${exec_start#ExecStart=}"
     else
-        echo "  Service: not installed"
+        echo "  服务文件  ：未安装"
     fi
 
     local status="unknown"
     status=$(systemctl is-active "$RFW_SERVICE_NAME" 2>/dev/null || true)
-    echo "  State  : ${status:-unknown}"
+    if [[ -z "${status:-}" || "$status" == "unknown" ]]; then
+        status="未知"
+    fi
+    echo "  运行状态  ：${status}"
     divider
 }
 
@@ -614,7 +617,7 @@ parse_args() {
             --help|-h)
                 usage; exit 0 ;;
             *)
-                error "Unknown argument: $1"
+                error "未知参数：$1"
                 usage
                 exit 1
                 ;;
@@ -624,7 +627,7 @@ parse_args() {
     case "$XDP_MODE" in
         auto|skb|drv|driver|hw|hardware) ;;
         *)
-            error "Invalid --xdp-mode: ${XDP_MODE}"
+            error "--xdp-mode 无效：${XDP_MODE}"
             exit 1
             ;;
     esac
@@ -632,7 +635,7 @@ parse_args() {
     case "$RULE_PROFILE" in
         ""|strong|hy2|tuic|tcp-node|baseline|manual) ;;
         *)
-            error "Invalid --profile: ${RULE_PROFILE}"
+            error "--profile 无效：${RULE_PROFILE}"
             exit 1
             ;;
     esac
@@ -651,7 +654,7 @@ main() {
         logs)
             show_logs ;;
         *)
-            error "Unknown action: ${ACTION}"
+            error "未知操作：${ACTION}"
             exit 1
             ;;
     esac
