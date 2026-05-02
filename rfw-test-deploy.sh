@@ -114,8 +114,10 @@ RFW 测试部署脚本 v${SCRIPT_VERSION}
   --rules "<参数>"            直接传入原始 RFW 规则参数，会覆盖默认规则。
                               示例：--rules "--countries CN --block-http"
   --no-default-rules          不生成默认规则；除非同时指定 --rules。
-  --profile <配置>            规则配置：strong、hy2、tuic、tcp-node、baseline、manual。
+  --profile <配置>            规则模板。模板是预设规则组合，不是单条规则。
+                              可选：strong、hy2、tuic、tcp-node、baseline、manual。
                               支持组合：--profile hy2,tuic,tcp-node
+                              manual 是自定义规则入口，不能和其它模板混选。
   --countries <列表>          默认规则使用的国家代码列表，默认：CN。
   --geo-mode <blacklist|whitelist|none>
                               默认规则的 GeoIP 模式，默认：blacklist。
@@ -375,6 +377,23 @@ profile_desc() {
     esac
 }
 
+profile_has_manual_mix() {
+    local profiles="$1"
+    [[ " ${profiles} " == *" manual "* ]] || return 1
+    [[ "$(wc -w <<< "$profiles" | tr -d ' ')" -gt 1 ]]
+}
+
+show_selected_profiles() {
+    local profiles="$1"
+    local profile=""
+
+    echo ""
+    echo -e "${BOLD}已选择的模板：${NC}"
+    for profile in $profiles; do
+        echo -e "  ${CYAN}- ${profile}${NC} ${DIM}$(profile_desc "$profile")${NC}"
+    done
+}
+
 normalize_profile_selection() {
     local input="${1:-strong}"
     local token=""
@@ -397,12 +416,15 @@ normalize_profile_selection() {
 
 show_profile_menu() {
     section_title "规则模板"
+    echo -e "${DIM}模板是预设规则组合，不是单条规则。选择多个模板时会合并规则并自动去重。${NC}"
+    echo -e "${DIM}如果你想逐条选择规则，请单独选择 6，不要和其它模板混选。${NC}"
+    echo ""
     menu_line "1" "strong" "强力阻断：QUIC、HY2、TUIC、VLESS、VMess、UDP-FET、SOCKS、WG、HTTP、Email 全开"
     menu_line "2" "hy2" "重点测试 HY2 / 混淆 HY2 / UDP 滥用"
     menu_line "3" "tuic" "重点测试 TUIC / 非 Web 端口 QUIC 代理"
     menu_line "4" "tcp-node" "重点测试 VLESS、VMess、SOCKS、FET 这类 TCP 弱节点协议"
     menu_line "5" "baseline" "基础节点阻断组合"
-    menu_line "6" "manual" "进入自定义规则批量选择"
+    menu_line "6" "manual" "进入自定义规则批量选择，不能和其它模板混选"
     menu_line "0" "返回主菜单"
     echo -e "${DIM}支持批量输入：2 3 4、2-3-4、2-4、hy2,tuic,tcp-node。规则会自动合并去重。${NC}"
     echo ""
@@ -425,8 +447,13 @@ select_rule_profile() {
             return 0
         fi
         if normalized=$(normalize_profile_selection "${choice:-1}"); then
+            if profile_has_manual_mix "$normalized"; then
+                warn "manual 是自定义规则入口，不能和其它模板混选。请只输入 6，或只选择 1-5 的模板组合。"
+                continue
+            fi
             RULE_PROFILE="$normalized"
             log "已选择模板：${RULE_PROFILE}"
+            show_selected_profiles "$RULE_PROFILE"
             return 0
         fi
         warn "选择无效，请重新输入。示例：2 3 4、2-3-4 或 2-4"
@@ -640,6 +667,10 @@ build_default_rules() {
             error "--profile 无效：${RULE_PROFILE}。可选值：strong、hy2、tuic、tcp-node、baseline、manual，也支持逗号分隔组合。"
             exit 1
         }
+        if profile_has_manual_mix "$RULE_PROFILE"; then
+            error "--profile 中 manual 不能和其它模板混选。请只用 --profile manual，或只组合 strong/hy2/tuic/tcp-node/baseline。"
+            exit 1
+        fi
 
         RFW_ARGS=""
         local profile=""
