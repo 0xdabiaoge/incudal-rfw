@@ -671,14 +671,12 @@ fn is_common_web_quic_port(port: u16) -> bool {
 // TLS 握手格式：[\x16-\x17]\x03[\x00-\x09]
 #[inline(always)]
 fn is_tls(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
-    // 读取前3个字节
-    let bytes = match ptr_at::<[u8; 3]>(ctx, payload_offset) {
-        Ok(ptr) => unsafe { *ptr },
-        Err(_) => return Ok(false),
-    };
+    let b0 = read_u8(ctx, payload_offset)?;
+    let b1 = read_u8(ctx, payload_offset + 1)?;
+    let b2 = read_u8(ctx, payload_offset + 2)?;
 
     // TLS: [\x16-\x17]\x03[\x00-\x09]
-    if bytes[0] >= 0x16 && bytes[0] <= 0x17 && bytes[1] == 0x03 && bytes[2] <= 0x09 {
+    if b0 >= 0x16 && b0 <= 0x17 && b1 == 0x03 && b2 <= 0x09 {
         return Ok(true);
     }
 
@@ -689,19 +687,11 @@ fn is_tls(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
 // 检查 TCP payload 开头是否包含 HTTP 方法
 #[inline(always)]
 fn is_http_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
-    // 尝试读取前4个字节来检测 HTTP 方法
-    let method_bytes = match ptr_at::<[u8; 4]>(ctx, payload_offset) {
-        Ok(ptr) => unsafe { *ptr },
-        Err(_) => {
-            return Ok(false);
-        }
-    };
-
     // 构造u32进行比较（大端）
-    let method_u32 = ((method_bytes[0] as u32) << 24)
-        | ((method_bytes[1] as u32) << 16)
-        | ((method_bytes[2] as u32) << 8)
-        | (method_bytes[3] as u32);
+    let method_u32 = ((read_u8(ctx, payload_offset)? as u32) << 24)
+        | ((read_u8(ctx, payload_offset + 1)? as u32) << 16)
+        | ((read_u8(ctx, payload_offset + 2)? as u32) << 8)
+        | (read_u8(ctx, payload_offset + 3)? as u32);
 
     // 检查是否匹配常见的 HTTP 方法
     if method_u32 == HTTP_GET
@@ -723,34 +713,30 @@ fn is_http_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> 
 // SOCKS5 握手格式：VER (1 byte) | NMETHODS (1 byte) | METHODS (1-255 bytes)
 // SOCKS4/4a 请求格式：VER (1 byte) | CMD (1 byte) | DSTPORT | DSTIP | USERID
 fn is_socks5_request(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
-    // 尝试读取前2个字节
-    let socks_header = match ptr_at::<[u8; 2]>(ctx, payload_offset) {
-        Ok(ptr) => unsafe { *ptr },
-        Err(_) => return Ok(false), // payload 太小
-    };
+    let version = read_u8(ctx, payload_offset)?;
+    let second_byte = read_u8(ctx, payload_offset + 1)?;
 
-    if socks_header[0] == SOCKS4_VERSION {
-        let command = socks_header[1];
+    if version == SOCKS4_VERSION {
+        let command = second_byte;
         if command != 0x01 && command != 0x02 {
             return Ok(false);
         }
 
-        let req = match ptr_at::<[u8; 8]>(ctx, payload_offset) {
-            Ok(ptr) => unsafe { *ptr },
-            Err(_) => return Ok(false),
-        };
-
-        let dst_port_nonzero = req[2] != 0 || req[3] != 0;
-        let dst_ip_nonzero = req[4] != 0 || req[5] != 0 || req[6] != 0 || req[7] != 0;
+        let dst_port_nonzero =
+            read_u8(ctx, payload_offset + 2)? != 0 || read_u8(ctx, payload_offset + 3)? != 0;
+        let dst_ip_nonzero = read_u8(ctx, payload_offset + 4)? != 0
+            || read_u8(ctx, payload_offset + 5)? != 0
+            || read_u8(ctx, payload_offset + 6)? != 0
+            || read_u8(ctx, payload_offset + 7)? != 0;
         return Ok(dst_port_nonzero && dst_ip_nonzero);
     }
 
-    if socks_header[0] != SOCKS5_VERSION {
+    if version != SOCKS5_VERSION {
         return Ok(false);
     }
 
     // 检查方法数量是否合理（1-255）
-    let nmethods = socks_header[1];
+    let nmethods = second_byte;
     if nmethods == 0 {
         return Ok(false);
     }
@@ -873,14 +859,25 @@ macro_rules! byte_popcount {
     }};
 }
 
-// FET (Fully Encrypted Traffic) 检测 - 栈优化版本
-// 分批读取32字节以减少栈使用
-//
-// 检测逻辑：
-// 1. TLS/HTTP 豁免（Ex5）- 复用公共方法
-// 2. 前6字节可打印性豁免（Ex2）
-// 3. 熵值检测（Ex1，通过 popcount）
-// 4. 严格模式：默认阻止 | 宽松模式：默认放过
+#[inline(always)]
+fn read_u8(ctx: &XdpContext, offset: usize) -> Result<u8, ()> {
+    let ptr = ptr_at::<u8>(ctx, offset)?;
+    Ok(unsafe { *ptr })
+}
+
+#[inline(always)]
+fn is_printable_ascii(byte: u8) -> bool {
+    byte >= 0x20 && byte <= 0x7e
+}
+
+#[inline(always)]
+fn payload_popcount(ctx: &XdpContext, payload_offset: usize, index: usize) -> Result<u32, ()> {
+    let byte = read_u8(ctx, payload_offset + index)?;
+    Ok(byte_popcount!(byte))
+}
+
+// FET (Fully Encrypted Traffic) 检测。eBPF verifier 对栈很敏感，所以这里
+// 不再读取 [u8; 16] 局部数组，而是按字节读取并直接累加。
 #[inline(always)]
 fn is_fully_encrypted_traffic(
     ctx: &XdpContext,
@@ -893,75 +890,23 @@ fn is_fully_encrypted_traffic(
 ) -> Result<bool, ()> {
     // Ex5: TLS 豁免检测
     if is_tls(ctx, payload_offset)? {
-        debug!(
-            ctx,
-            "FET豁免-TLS: 源 {:i}:{} -> 目标端口 {}, payload={}字节",
-            u32::from_be(src_ip),
-            src_port,
-            dst_port,
-            payload_len
-        );
         return Ok(false);
     }
 
     // Ex5: HTTP 豁免检测（需要4字节）
     if payload_len >= 4 && is_http_request(ctx, payload_offset)? {
-        debug!(
-            ctx,
-            "FET豁免-HTTP: 源 {:i}:{} -> 目标端口 {}, payload={}字节",
-            u32::from_be(src_ip),
-            src_port,
-            dst_port,
-            payload_len
-        );
         return Ok(false);
     }
 
-    // 分批读取以减少栈使用：先读取前16字节
-    let bytes_first = match ptr_at::<[u8; 16]>(ctx, payload_offset) {
-        Ok(ptr) => unsafe { *ptr },
-        Err(_) => {
-            debug!(
-                ctx,
-                "FET豁免-无法读取: 源 {:i}:{} -> 目标端口 {}, payload={}字节",
-                u32::from_be(src_ip),
-                src_port,
-                dst_port,
-                payload_len
-            );
-            return Ok(false);
-        }
-    };
-
     // Ex2: 检查前6字节是否都是可打印字符
-    let all_printable = bytes_first[0] >= 0x20
-        && bytes_first[0] <= 0x7e
-        && bytes_first[1] >= 0x20
-        && bytes_first[1] <= 0x7e
-        && bytes_first[2] >= 0x20
-        && bytes_first[2] <= 0x7e
-        && bytes_first[3] >= 0x20
-        && bytes_first[3] <= 0x7e
-        && bytes_first[4] >= 0x20
-        && bytes_first[4] <= 0x7e
-        && bytes_first[5] >= 0x20
-        && bytes_first[5] <= 0x7e;
-
-    if all_printable {
-        debug!(
-            ctx,
-            "FET豁免-可打印字符: 源 {:i}:{} -> 目标端口 {}, payload={}字节, 前6字节=[{:x},{:x},{:x},{:x},{:x},{:x}]",
-            u32::from_be(src_ip),
-            src_port,
-            dst_port,
-            payload_len,
-            bytes_first[0],
-            bytes_first[1],
-            bytes_first[2],
-            bytes_first[3],
-            bytes_first[4],
-            bytes_first[5]
-        );
+    if payload_len >= 6
+        && is_printable_ascii(read_u8(ctx, payload_offset)?)
+        && is_printable_ascii(read_u8(ctx, payload_offset + 1)?)
+        && is_printable_ascii(read_u8(ctx, payload_offset + 2)?)
+        && is_printable_ascii(read_u8(ctx, payload_offset + 3)?)
+        && is_printable_ascii(read_u8(ctx, payload_offset + 4)?)
+        && is_printable_ascii(read_u8(ctx, payload_offset + 5)?)
+    {
         return Ok(false); // 豁免：可能是文本协议
     }
 
@@ -971,137 +916,101 @@ fn is_fully_encrypted_traffic(
     // Ex1: 计算前16字节的 popcount
     let mut total_popcount = 0u32;
 
-    // 根据实际长度处理前16字节
+    if check_len >= 1 {
+        total_popcount += payload_popcount(ctx, payload_offset, 0)?;
+    }
+    if check_len >= 2 {
+        total_popcount += payload_popcount(ctx, payload_offset, 1)?;
+    }
+    if check_len >= 3 {
+        total_popcount += payload_popcount(ctx, payload_offset, 2)?;
+    }
+    if check_len >= 4 {
+        total_popcount += payload_popcount(ctx, payload_offset, 3)?;
+    }
+    if check_len >= 5 {
+        total_popcount += payload_popcount(ctx, payload_offset, 4)?;
+    }
+    if check_len >= 6 {
+        total_popcount += payload_popcount(ctx, payload_offset, 5)?;
+    }
+    if check_len >= 7 {
+        total_popcount += payload_popcount(ctx, payload_offset, 6)?;
+    }
+    if check_len >= 8 {
+        total_popcount += payload_popcount(ctx, payload_offset, 7)?;
+    }
+    if check_len >= 9 {
+        total_popcount += payload_popcount(ctx, payload_offset, 8)?;
+    }
+    if check_len >= 10 {
+        total_popcount += payload_popcount(ctx, payload_offset, 9)?;
+    }
+    if check_len >= 11 {
+        total_popcount += payload_popcount(ctx, payload_offset, 10)?;
+    }
+    if check_len >= 12 {
+        total_popcount += payload_popcount(ctx, payload_offset, 11)?;
+    }
+    if check_len >= 13 {
+        total_popcount += payload_popcount(ctx, payload_offset, 12)?;
+    }
+    if check_len >= 14 {
+        total_popcount += payload_popcount(ctx, payload_offset, 13)?;
+    }
+    if check_len >= 15 {
+        total_popcount += payload_popcount(ctx, payload_offset, 14)?;
+    }
     if check_len >= 16 {
-        // 完整处理前16字节
-        total_popcount = byte_popcount!(bytes_first[0])
-            + byte_popcount!(bytes_first[1])
-            + byte_popcount!(bytes_first[2])
-            + byte_popcount!(bytes_first[3])
-            + byte_popcount!(bytes_first[4])
-            + byte_popcount!(bytes_first[5])
-            + byte_popcount!(bytes_first[6])
-            + byte_popcount!(bytes_first[7])
-            + byte_popcount!(bytes_first[8])
-            + byte_popcount!(bytes_first[9])
-            + byte_popcount!(bytes_first[10])
-            + byte_popcount!(bytes_first[11])
-            + byte_popcount!(bytes_first[12])
-            + byte_popcount!(bytes_first[13])
-            + byte_popcount!(bytes_first[14])
-            + byte_popcount!(bytes_first[15]);
-
-        // 如果需要检测超过16字节，读取后16字节
-        if check_len > 16 {
-            let bytes_second = match ptr_at::<[u8; 16]>(ctx, payload_offset + 16) {
-                Ok(ptr) => unsafe { *ptr },
-                Err(_) => {
-                    // 无法读取后16字节，使用前16字节的结果
-                    let avg_popcount_x100 = (total_popcount * 100) / 16;
-                    return Ok(strict_mode && (avg_popcount_x100 > 340 && avg_popcount_x100 < 460));
-                }
-            };
-
-            // 计算需要的后半部分字节数
-            let remaining = check_len - 16;
-
-            // 累加后16字节（最多16字节）
-            if remaining >= 1 {
-                total_popcount += byte_popcount!(bytes_second[0]);
-            }
-            if remaining >= 2 {
-                total_popcount += byte_popcount!(bytes_second[1]);
-            }
-            if remaining >= 3 {
-                total_popcount += byte_popcount!(bytes_second[2]);
-            }
-            if remaining >= 4 {
-                total_popcount += byte_popcount!(bytes_second[3]);
-            }
-            if remaining >= 5 {
-                total_popcount += byte_popcount!(bytes_second[4]);
-            }
-            if remaining >= 6 {
-                total_popcount += byte_popcount!(bytes_second[5]);
-            }
-            if remaining >= 7 {
-                total_popcount += byte_popcount!(bytes_second[6]);
-            }
-            if remaining >= 8 {
-                total_popcount += byte_popcount!(bytes_second[7]);
-            }
-            if remaining >= 9 {
-                total_popcount += byte_popcount!(bytes_second[8]);
-            }
-            if remaining >= 10 {
-                total_popcount += byte_popcount!(bytes_second[9]);
-            }
-            if remaining >= 11 {
-                total_popcount += byte_popcount!(bytes_second[10]);
-            }
-            if remaining >= 12 {
-                total_popcount += byte_popcount!(bytes_second[11]);
-            }
-            if remaining >= 13 {
-                total_popcount += byte_popcount!(bytes_second[12]);
-            }
-            if remaining >= 14 {
-                total_popcount += byte_popcount!(bytes_second[13]);
-            }
-            if remaining >= 15 {
-                total_popcount += byte_popcount!(bytes_second[14]);
-            }
-            if remaining >= 16 {
-                total_popcount += byte_popcount!(bytes_second[15]);
-            }
-        }
-    } else {
-        // 长度在6-15之间，只处理实际长度（展开以避免循环）
-        if check_len >= 1 {
-            total_popcount += byte_popcount!(bytes_first[0]);
-        }
-        if check_len >= 2 {
-            total_popcount += byte_popcount!(bytes_first[1]);
-        }
-        if check_len >= 3 {
-            total_popcount += byte_popcount!(bytes_first[2]);
-        }
-        if check_len >= 4 {
-            total_popcount += byte_popcount!(bytes_first[3]);
-        }
-        if check_len >= 5 {
-            total_popcount += byte_popcount!(bytes_first[4]);
-        }
-        if check_len >= 6 {
-            total_popcount += byte_popcount!(bytes_first[5]);
-        }
-        if check_len >= 7 {
-            total_popcount += byte_popcount!(bytes_first[6]);
-        }
-        if check_len >= 8 {
-            total_popcount += byte_popcount!(bytes_first[7]);
-        }
-        if check_len >= 9 {
-            total_popcount += byte_popcount!(bytes_first[8]);
-        }
-        if check_len >= 10 {
-            total_popcount += byte_popcount!(bytes_first[9]);
-        }
-        if check_len >= 11 {
-            total_popcount += byte_popcount!(bytes_first[10]);
-        }
-        if check_len >= 12 {
-            total_popcount += byte_popcount!(bytes_first[11]);
-        }
-        if check_len >= 13 {
-            total_popcount += byte_popcount!(bytes_first[12]);
-        }
-        if check_len >= 14 {
-            total_popcount += byte_popcount!(bytes_first[13]);
-        }
-        if check_len >= 15 {
-            total_popcount += byte_popcount!(bytes_first[14]);
-        }
+        total_popcount += payload_popcount(ctx, payload_offset, 15)?;
+    }
+    if check_len >= 17 {
+        total_popcount += payload_popcount(ctx, payload_offset, 16)?;
+    }
+    if check_len >= 18 {
+        total_popcount += payload_popcount(ctx, payload_offset, 17)?;
+    }
+    if check_len >= 19 {
+        total_popcount += payload_popcount(ctx, payload_offset, 18)?;
+    }
+    if check_len >= 20 {
+        total_popcount += payload_popcount(ctx, payload_offset, 19)?;
+    }
+    if check_len >= 21 {
+        total_popcount += payload_popcount(ctx, payload_offset, 20)?;
+    }
+    if check_len >= 22 {
+        total_popcount += payload_popcount(ctx, payload_offset, 21)?;
+    }
+    if check_len >= 23 {
+        total_popcount += payload_popcount(ctx, payload_offset, 22)?;
+    }
+    if check_len >= 24 {
+        total_popcount += payload_popcount(ctx, payload_offset, 23)?;
+    }
+    if check_len >= 25 {
+        total_popcount += payload_popcount(ctx, payload_offset, 24)?;
+    }
+    if check_len >= 26 {
+        total_popcount += payload_popcount(ctx, payload_offset, 25)?;
+    }
+    if check_len >= 27 {
+        total_popcount += payload_popcount(ctx, payload_offset, 26)?;
+    }
+    if check_len >= 28 {
+        total_popcount += payload_popcount(ctx, payload_offset, 27)?;
+    }
+    if check_len >= 29 {
+        total_popcount += payload_popcount(ctx, payload_offset, 28)?;
+    }
+    if check_len >= 30 {
+        total_popcount += payload_popcount(ctx, payload_offset, 29)?;
+    }
+    if check_len >= 31 {
+        total_popcount += payload_popcount(ctx, payload_offset, 30)?;
+    }
+    if check_len >= 32 {
+        total_popcount += payload_popcount(ctx, payload_offset, 31)?;
     }
 
     // 平均 popcount * 100（避免浮点运算）
@@ -1109,16 +1018,6 @@ fn is_fully_encrypted_traffic(
 
     // 熵值异常豁免：不在 3.4-4.6 范围内（340-460）
     if avg_popcount_x100 <= 340 || avg_popcount_x100 >= 460 {
-        debug!(
-            ctx,
-            "FET豁免-熵值异常: 源 {:i}:{} -> 目标端口 {}, 熵值={}.{}, payload={}字节",
-            u32::from_be(src_ip),
-            src_port,
-            dst_port,
-            avg_popcount_x100 / 100,
-            avg_popcount_x100 % 100,
-            payload_len
-        );
         return Ok(false); // 豁免：熵值异常
     }
 
@@ -1128,25 +1027,23 @@ fn is_fully_encrypted_traffic(
     if strict_mode {
         debug!(
             ctx,
-            "FET检测-全加密流量: 源 {:i}:{} -> 目标端口 {}, 熵值={}.{}, payload={}字节, 检测长度={}",
+            "FET检测-全加密流量: 源 {:i}:{} -> 目标端口 {}, 熵值={}.{}, 检测长度={}",
             u32::from_be(src_ip),
             src_port,
             dst_port,
             avg_popcount_x100 / 100,
             avg_popcount_x100 % 100,
-            payload_len,
             check_len
         );
     } else {
         debug!(
             ctx,
-            "FET检测-疑似全加密(宽松放过): 源 {:i}:{} -> 目标端口 {}, 熵值={}.{}, payload={}字节, 检测长度={}",
+            "FET检测-疑似全加密(宽松放过): 源 {:i}:{} -> 目标端口 {}, 熵值={}.{}, 检测长度={}",
             u32::from_be(src_ip),
             src_port,
             dst_port,
             avg_popcount_x100 / 100,
             avg_popcount_x100 % 100,
-            payload_len,
             check_len
         );
     }
@@ -1160,16 +1057,10 @@ fn is_fully_encrypted_traffic(
 // - 固定的包大小（根据类型）
 #[inline(always)]
 fn is_wireguard_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
-    // 使用安全的 ptr_at 函数读取前4个字节
-    let header = match ptr_at::<[u8; 4]>(ctx, payload_offset) {
-        Ok(ptr) => unsafe { *ptr },
-        Err(_) => return Ok(false),
-    };
-
-    let msg_type = header[0];
-    let reserved1 = header[1];
-    let reserved2 = header[2];
-    let reserved3 = header[3];
+    let msg_type = read_u8(ctx, payload_offset)?;
+    let reserved1 = read_u8(ctx, payload_offset + 1)?;
+    let reserved2 = read_u8(ctx, payload_offset + 2)?;
+    let reserved3 = read_u8(ctx, payload_offset + 3)?;
 
     // WireGuard 保留字段必须为 0
     if reserved1 != 0 || reserved2 != 0 || reserved3 != 0 {
@@ -1225,21 +1116,15 @@ fn is_wireguard_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, 
 // - 短头部包（Short Header）：首字节最高位为 0（已建立连接）
 #[inline(always)]
 fn is_quic_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
-    // 读取前5个字节（首字节 + 4字节版本号）
-    let header = match ptr_at::<[u8; 5]>(ctx, payload_offset) {
-        Ok(ptr) => unsafe { *ptr },
-        Err(_) => return Ok(false),
-    };
-
-    let first_byte = header[0];
+    let first_byte = read_u8(ctx, payload_offset)?;
 
     // 检查长头部包（最高位为 1）
     if (first_byte & 0x80) == 0x80 {
         // 读取版本号（大端序）
-        let version = ((header[1] as u32) << 24)
-            | ((header[2] as u32) << 16)
-            | ((header[3] as u32) << 8)
-            | (header[4] as u32);
+        let version = ((read_u8(ctx, payload_offset + 1)? as u32) << 24)
+            | ((read_u8(ctx, payload_offset + 2)? as u32) << 16)
+            | ((read_u8(ctx, payload_offset + 3)? as u32) << 8)
+            | (read_u8(ctx, payload_offset + 4)? as u32);
 
         // 检查常见的 QUIC 版本号
         // 0x00000000: 版本协商包
