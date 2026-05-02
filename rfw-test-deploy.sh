@@ -39,6 +39,7 @@ NON_INTERACTIVE="false"
 SHOW_LOGS_ON_FAILURE="true"
 RULE_PROFILE=""
 DELETE_SELF_ON_UNINSTALL="true"
+MENU_BACK="false"
 
 log() { echo -e "${GREEN}[OK]${NC} $1"; }
 info() { echo -e "${BLUE}[i]${NC} $1"; }
@@ -79,6 +80,15 @@ append_rule() {
     esac
 }
 
+request_menu_back() {
+    MENU_BACK="true"
+    info "已返回主菜单。"
+}
+
+is_menu_back() {
+    [[ "$MENU_BACK" == "true" ]]
+}
+
 usage() {
     cat <<EOF
 RFW 测试部署脚本 v${SCRIPT_VERSION}
@@ -92,6 +102,9 @@ RFW 测试部署脚本 v${SCRIPT_VERSION}
   sudo bash rfw-test-deploy.sh --stats
   sudo bash rfw-test-deploy.sh --restart
   sudo bash rfw-test-deploy.sh --uninstall
+
+交互提示：
+  在子菜单中输入 0 可以返回主菜单，不会继续执行当前部署流程。
 
 安装参数：
   --iface <网卡名>            指定要挂载 XDP 的网卡。
@@ -133,6 +146,7 @@ pause_enter() {
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
         return 0
     fi
+    MENU_BACK="false"
     echo ""
     echo -ne "${DIM}按回车继续...${NC}"
     read -r _ || true
@@ -287,12 +301,17 @@ choose_iface() {
             echo -e "  ${CYAN}${num})${NC} ${interfaces[$i]}"
         fi
     done
+    echo -e "  ${CYAN}0)${NC} 返回主菜单"
     echo ""
 
     while true; do
-        echo -ne "${BOLD}请选择网卡 [1-${#interfaces[@]}]：${NC}"
+        echo -ne "${BOLD}请选择网卡 [1-${#interfaces[@]}，0 返回]：${NC}"
         local choice=""
         read -r choice || true
+        if [[ "${choice:-}" == "0" ]]; then
+            request_menu_back
+            return 0
+        fi
         if [[ "${choice:-}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#interfaces[@]} )); then
             IFACE="${interfaces[$((choice - 1))]}"
             return 0
@@ -384,6 +403,7 @@ show_profile_menu() {
     menu_line "4" "tcp-node" "重点测试 VLESS、VMess、SOCKS、FET 这类 TCP 弱节点协议"
     menu_line "5" "baseline" "基础节点阻断组合"
     menu_line "6" "manual" "进入自定义规则批量选择"
+    menu_line "0" "返回主菜单"
     echo -e "${DIM}支持批量输入：2 3 4、2-3-4、2-4、hy2,tuic,tcp-node。规则会自动合并去重。${NC}"
     echo ""
 }
@@ -396,10 +416,14 @@ select_rule_profile() {
     show_profile_menu
 
     while true; do
-        echo -ne "${BOLD}请选择规则模板 [可批量，默认 1]：${NC}"
+        echo -ne "${BOLD}请选择规则模板 [可批量，默认 1；0 返回]：${NC}"
         local choice=""
         local normalized=""
         read -r choice || true
+        if [[ "${choice:-}" == "0" ]]; then
+            request_menu_back
+            return 0
+        fi
         if normalized=$(normalize_profile_selection "${choice:-1}"); then
             RULE_PROFILE="$normalized"
             log "已选择模板：${RULE_PROFILE}"
@@ -439,6 +463,7 @@ show_manual_rule_menu() {
     menu_line "9" "UDP-FET" "阻断 UDP 高熵加密流量"
     menu_line "10" "VLESS TCP" "阻断裸 VLESS over TCP"
     menu_line "11" "VMess TCP" "阻断裸 VMess over TCP"
+    menu_line "0" "返回主菜单"
     echo -e "${DIM}支持批量输入：1 3 6-11、1-3-6；输入 all 全选；输入 none 不启用规则。${NC}"
     echo ""
 }
@@ -464,7 +489,7 @@ build_manual_rules() {
     show_manual_rule_menu
 
     while true; do
-        echo -ne "${BOLD}请选择阻断规则 [默认 all]：${NC}"
+        echo -ne "${BOLD}请选择阻断规则 [默认 all；0 返回]：${NC}"
         local choice=""
         local token=""
         local rule=""
@@ -472,7 +497,12 @@ build_manual_rules() {
         read -r choice || true
         choice="${choice:-all}"
 
-        if [[ "$choice" == "none" || "$choice" == "0" ]]; then
+        if [[ "$choice" == "0" ]]; then
+            request_menu_back
+            return 0
+        fi
+
+        if [[ "$choice" == "none" ]]; then
             RFW_ARGS=""
             warn "你选择了不启用任何阻断规则。"
             return 0
@@ -567,6 +597,7 @@ build_default_rules() {
         RFW_ARGS=""
     else
         select_rule_profile
+        is_menu_back && return 0
         RULE_PROFILE=$(normalize_profile_selection "${RULE_PROFILE:-strong}") || {
             error "--profile 无效：${RULE_PROFILE}。可选值：strong、hy2、tuic、tcp-node、baseline、manual，也支持逗号分隔组合。"
             exit 1
@@ -577,6 +608,7 @@ build_default_rules() {
         for profile in $RULE_PROFILE; do
             if [[ "$profile" == "manual" ]]; then
                 build_manual_rules
+                is_menu_back && return 0
             else
                 apply_profile_rules "$profile" || {
                     error "--profile 无效：${profile}"
@@ -738,7 +770,9 @@ install_rfw() {
     fi
 
     choose_iface
+    is_menu_back && return 0
     build_default_rules
+    is_menu_back && return 0
 
     if [[ "$NON_INTERACTIVE" != "true" && "$FORCE" != "true" ]]; then
         show_summary
@@ -1017,19 +1051,32 @@ configure_geo_mode_menu() {
     echo -e "  ${CYAN}1)${NC} 只阻断指定国家来源 ${DIM}(默认 CN)${NC}"
     echo -e "  ${CYAN}2)${NC} 只允许指定国家，其余来源按规则阻断"
     echo -e "  ${CYAN}3)${NC} 不区分国家，对所有来源生效 ${DIM}(测试时慎用)${NC}"
+    echo -e "  ${CYAN}0)${NC} 返回主菜单"
     echo ""
-    echo -ne "${BOLD}请选择 GeoIP 模式 [1-3，默认 1]：${NC}"
+    echo -ne "${BOLD}请选择 GeoIP 模式 [1-3，默认 1；0 返回]：${NC}"
 
     local choice=""
     read -r choice || true
     case "${choice:-1}" in
+        0)
+            request_menu_back
+            return 0
+            ;;
         1)
             GEO_MODE="blacklist"
             COUNTRIES=$(prompt_input "请输入国家代码列表" "CN")
+            if [[ "$COUNTRIES" == "0" ]]; then
+                request_menu_back
+                return 0
+            fi
             ;;
         2)
             GEO_MODE="whitelist"
             COUNTRIES=$(prompt_input "请输入允许的国家代码列表" "CN")
+            if [[ "$COUNTRIES" == "0" ]]; then
+                request_menu_back
+                return 0
+            fi
             ;;
         3)
             GEO_MODE="none"
@@ -1046,7 +1093,13 @@ configure_geo_mode_menu() {
 configure_advanced_menu() {
     local answer=""
 
+    section_title "高级部署选项"
+    echo -e "${DIM}输入 0 可返回主菜单。${NC}"
     XDP_MODE=$(prompt_input "XDP 挂载模式 auto/skb/drv/hw" "auto")
+    if [[ "$XDP_MODE" == "0" ]]; then
+        request_menu_back
+        return 0
+    fi
     case "$XDP_MODE" in
         auto|skb|drv|driver|hw|hardware) ;;
         *)
@@ -1062,13 +1115,21 @@ configure_advanced_menu() {
     fi
 
     if prompt_yes_no "是否自定义二进制或 Release 下载地址？" "no"; then
-        echo -ne "${BOLD}选择下载方式：1) 最新 Release  2) 自定义 Release 基础地址  3) 完整二进制 URL [默认 1]：${NC}"
+        echo -ne "${BOLD}选择下载方式：1) 最新 Release  2) 自定义 Release 基础地址  3) 完整二进制 URL  0) 返回 [默认 1]：${NC}"
         read -r answer || true
         case "${answer:-1}" in
+            0)
+                request_menu_back
+                return 0
+                ;;
             2) RELEASE_URL=$(prompt_input "请输入 Release 基础地址" "$DEFAULT_RELEASE_URL") ;;
             3) BINARY_URL=$(prompt_input "请输入完整二进制 URL" "") ;;
             *) RELEASE_URL="$DEFAULT_RELEASE_URL" ;;
         esac
+        if [[ "$RELEASE_URL" == "0" || "$BINARY_URL" == "0" ]]; then
+            request_menu_back
+            return 0
+        fi
     fi
 }
 
@@ -1077,8 +1138,11 @@ configure_menu_install() {
     reset_install_options
 
     choose_iface
+    is_menu_back && return 0
     configure_geo_mode_menu
+    is_menu_back && return 0
     configure_advanced_menu
+    is_menu_back && return 0
 
     case "$mode" in
         strong|hy2|tuic|tcp-node|baseline)
@@ -1086,6 +1150,7 @@ configure_menu_install() {
             ;;
         profile)
             select_rule_profile
+            is_menu_back && return 0
             ;;
         manual)
             RULE_PROFILE="manual"
@@ -1093,6 +1158,10 @@ configure_menu_install() {
         raw)
             ENABLE_DEFAULT_RULES="false"
             RFW_ARGS=$(prompt_input "请输入完整 RFW 参数" "--block-socks5 --block-fet-strict --block-wireguard --log-port-access")
+            if [[ "$RFW_ARGS" == "0" ]]; then
+                request_menu_back
+                return 0
+            fi
             ;;
         *)
             RULE_PROFILE="strong"
@@ -1141,23 +1210,32 @@ main_menu() {
                 COUNTRIES="CN"
                 LOG_PORT_ACCESS="true"
                 choose_iface
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 configure_advanced_menu
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 install_rfw
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 pause_enter
                 ;;
             2)
                 configure_menu_install "profile"
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 install_rfw
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 pause_enter
                 ;;
             3)
                 configure_menu_install "manual"
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 install_rfw
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 pause_enter
                 ;;
             4)
                 configure_menu_install "raw"
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 install_rfw
+                if is_menu_back; then MENU_BACK="false"; continue; fi
                 pause_enter
                 ;;
             5)
