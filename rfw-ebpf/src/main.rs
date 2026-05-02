@@ -132,6 +132,7 @@ struct UdpHdr {
 const ETH_P_IP: u16 = 0x0800;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
+const MAX_PACKET_READ_OFFSET: usize = 512;
 
 // 规则标志位
 const RULE_BLOCK_EMAIL: u32 = 1 << 0;
@@ -519,7 +520,10 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
 
             // 检查 WireGuard 入站屏蔽规则
             if (*config_flags & RULE_BLOCK_WIREGUARD) != 0 {
-                if should_check_udp && is_wireguard_packet(&ctx, payload_offset)? {
+                if should_check_udp
+                    && payload_size >= 4
+                    && is_wireguard_packet(&ctx, payload_offset, payload_size)?
+                {
                     if (*config_flags & RULE_LOG_PORT_ACCESS) != 0 {
                         log_port_access(src_ip, dst_port, IPPROTO_UDP, true);
                     }
@@ -539,7 +543,7 @@ fn try_rfw(ctx: XdpContext) -> Result<u32, ()> {
                     & (RULE_BLOCK_HYSTERIA2 | RULE_BLOCK_TUIC | RULE_BLOCK_QUIC))
                     != 0)
                 {
-                    is_quic_packet(&ctx, payload_offset)?
+                    payload_size >= 1 && is_quic_packet(&ctx, payload_offset, payload_size)?
                 } else {
                     false
                 };
@@ -1056,11 +1060,24 @@ fn is_fully_encrypted_traffic(
 // - 字节 1-3: 必须为 0（保留字段）
 // - 固定的包大小（根据类型）
 #[inline(always)]
-fn is_wireguard_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
-    let msg_type = read_u8(ctx, payload_offset)?;
-    let reserved1 = read_u8(ctx, payload_offset + 1)?;
-    let reserved2 = read_u8(ctx, payload_offset + 2)?;
-    let reserved3 = read_u8(ctx, payload_offset + 3)?;
+fn is_wireguard_packet(
+    ctx: &XdpContext,
+    payload_offset: usize,
+    payload_len: usize,
+) -> Result<bool, ()> {
+    if payload_len < 4 {
+        return Ok(false);
+    }
+
+    let hdr = match ptr_at::<[u8; 4]>(ctx, payload_offset) {
+        Ok(ptr) => unsafe { *ptr },
+        Err(_) => return Ok(false),
+    };
+
+    let msg_type = hdr[0];
+    let reserved1 = hdr[1];
+    let reserved2 = hdr[2];
+    let reserved3 = hdr[3];
 
     // WireGuard 保留字段必须为 0
     if reserved1 != 0 || reserved2 != 0 || reserved3 != 0 {
@@ -1068,33 +1085,29 @@ fn is_wireguard_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, 
     }
 
     // 计算实际数据包长度
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let packet_len = end.saturating_sub(start + payload_offset);
-
     // 根据消息类型检查包大小
     match msg_type {
         WG_TYPE_HANDSHAKE_INIT => {
             // 握手初始化包必须是 148 字节
-            if packet_len == WG_SIZE_HANDSHAKE_INIT {
+            if payload_len == WG_SIZE_HANDSHAKE_INIT {
                 return Ok(true);
             }
         }
         WG_TYPE_HANDSHAKE_RESP => {
             // 握手响应包必须是 92 字节
-            if packet_len == WG_SIZE_HANDSHAKE_RESP {
+            if payload_len == WG_SIZE_HANDSHAKE_RESP {
                 return Ok(true);
             }
         }
         WG_TYPE_COOKIE_REPLY => {
             // Cookie 应答包必须是 64 字节
-            if packet_len == WG_SIZE_COOKIE_REPLY {
+            if payload_len == WG_SIZE_COOKIE_REPLY {
                 return Ok(true);
             }
         }
         WG_TYPE_DATA => {
             // 数据包必须至少 32 字节，且长度是 16 的倍数（WireGuard 填充规则）
-            if packet_len >= WG_MIN_SIZE_DATA && (packet_len % 16) == 0 {
+            if payload_len >= WG_MIN_SIZE_DATA && (payload_len % 16) == 0 {
                 return Ok(true);
             }
         }
@@ -1115,16 +1128,32 @@ fn is_wireguard_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, 
 //   - 版本协商包: 版本号 0x00000000
 // - 短头部包（Short Header）：首字节最高位为 0（已建立连接）
 #[inline(always)]
-fn is_quic_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
+fn is_quic_packet(
+    ctx: &XdpContext,
+    payload_offset: usize,
+    payload_len: usize,
+) -> Result<bool, ()> {
+    if payload_len < 1 {
+        return Ok(false);
+    }
+
     let first_byte = read_u8(ctx, payload_offset)?;
 
     // 检查长头部包（最高位为 1）
     if (first_byte & 0x80) == 0x80 {
+        if payload_len < 5 {
+            return Ok(false);
+        }
+
         // 读取版本号（大端序）
-        let version = ((read_u8(ctx, payload_offset + 1)? as u32) << 24)
-            | ((read_u8(ctx, payload_offset + 2)? as u32) << 16)
-            | ((read_u8(ctx, payload_offset + 3)? as u32) << 8)
-            | (read_u8(ctx, payload_offset + 4)? as u32);
+        let hdr = match ptr_at::<[u8; 5]>(ctx, payload_offset) {
+            Ok(ptr) => unsafe { *ptr },
+            Err(_) => return Ok(false),
+        };
+        let version = ((hdr[1] as u32) << 24)
+            | ((hdr[2] as u32) << 16)
+            | ((hdr[3] as u32) << 8)
+            | (hdr[4] as u32);
 
         // 检查常见的 QUIC 版本号
         // 0x00000000: 版本协商包
@@ -1151,14 +1180,9 @@ fn is_quic_packet(ctx: &XdpContext, payload_offset: usize) -> Result<bool, ()> {
         // 短头部格式：0XXX XXXX (最高位为0)
         // 为了减少误判，我们只在有明确特征时才识别
 
-        // 检查是否有 QUIC 连接 ID（通过数据包长度判断）
-        let start = ctx.data();
-        let end = ctx.data_end();
-        let packet_len = end.saturating_sub(start + payload_offset);
-
         // QUIC 短头部包通常至少有 20 字节
         // 并且第一个字节的特定位模式
-        if packet_len >= 20 {
+        if payload_len >= 20 {
             // 如果固定位（bit 6）为 1，这是 QUIC v1/v2 的要求
             if (first_byte & 0x40) == 0x40 {
                 return Ok(true);
@@ -1212,12 +1236,17 @@ fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
     let end = ctx.data_end();
     let len = size_of::<T>();
 
-    // Verifier 要求这种形式：直接比较指针，不能先减法
-    if start + offset + len > end {
+    if offset > MAX_PACKET_READ_OFFSET {
         return Err(());
     }
 
-    Ok((start + offset) as *const T)
+    // Verifier 要求这种形式：直接比较指针，不能先减法
+    let ptr = start + offset;
+    if ptr + len > end {
+        return Err(());
+    }
+
+    Ok(ptr as *const T)
 }
 
 #[cfg(not(test))]
