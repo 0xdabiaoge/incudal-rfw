@@ -104,10 +104,11 @@ sudo ./rfw --iface eth0 \
   --block-udp-fet
 ```
 
-不区分国家，强力阻断所有来源的节点协议：
+默认只针对中国来源，强力阻断常见节点协议：
 
 ```bash
 sudo ./rfw --iface eth0 \
+  --countries CN \
   --block-email \
   --block-http \
   --block-socks5 \
@@ -157,25 +158,25 @@ sudo bash rfw-test-deploy.sh
 全局强力节点阻断：
 
 ```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile strong --geo-mode none --yes
+sudo bash rfw-test-deploy.sh --iface eth0 --profile strong --yes
 ```
 
 测试 HY2 / 混淆 HY2：
 
 ```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2 --geo-mode none
+sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2
 ```
 
 测试 TUIC：
 
 ```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile tuic --geo-mode none
+sudo bash rfw-test-deploy.sh --iface eth0 --profile tuic
 ```
 
 测试 TCP 弱节点协议：
 
 ```bash
-sudo bash rfw-test-deploy.sh --iface eth0 --profile tcp-node --geo-mode none
+sudo bash rfw-test-deploy.sh --iface eth0 --profile tcp-node
 ```
 
 可选 profile：

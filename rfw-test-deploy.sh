@@ -8,7 +8,7 @@
 # ============================================================================
 set -euo pipefail
 
-readonly SCRIPT_VERSION="0.2.0"
+readonly SCRIPT_VERSION="0.2.1"
 readonly DEFAULT_RELEASE_URL="https://github.com/0xdabiaoge/incudal-rfw/releases/latest/download"
 readonly RFW_INSTALL_DIR="/root/rfw"
 readonly RFW_BIN_PATH="${RFW_INSTALL_DIR}/rfw"
@@ -92,8 +92,8 @@ RFW 测试部署脚本 v${SCRIPT_VERSION}
   manual      逐条规则手动选择
 
 示例：
-  sudo bash rfw-test-deploy.sh --iface eth0 --profile strong --geo-mode none --yes
-  sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2 --geo-mode none
+  sudo bash rfw-test-deploy.sh --iface eth0 --profile strong --yes
+  sudo bash rfw-test-deploy.sh --iface eth0 --profile hy2
   sudo bash rfw-test-deploy.sh --iface eth0 --xdp-mode skb --log-port-access
   sudo bash rfw-test-deploy.sh --iface eth0 --rules "--block-all-from CN --log-port-access"
 EOF
@@ -178,9 +178,9 @@ prompt_input() {
     local answer=""
 
     if [[ -n "$default_value" ]]; then
-        echo -ne "${BOLD}${prompt}${NC} ${DIM}[默认：${default_value}]${NC}: "
+        echo -ne "${BOLD}${prompt}${NC} ${DIM}[默认：${default_value}]${NC}: " >&2
     else
-        echo -ne "${BOLD}${prompt}${NC}: "
+        echo -ne "${BOLD}${prompt}${NC}: " >&2
     fi
 
     read -r answer || true
@@ -790,13 +790,13 @@ configure_geo_mode_menu() {
     echo -e "${BOLD}GeoIP 作用范围：${NC}"
     echo -e "  ${CYAN}1)${NC} 只阻断指定国家来源 ${DIM}(默认 CN)${NC}"
     echo -e "  ${CYAN}2)${NC} 只允许指定国家，其余来源按规则阻断"
-    echo -e "  ${CYAN}3)${NC} 不区分国家，对所有来源生效"
+    echo -e "  ${CYAN}3)${NC} 不区分国家，对所有来源生效 ${DIM}(测试时慎用)${NC}"
     echo ""
-    echo -ne "${BOLD}请选择 GeoIP 模式 [1-3，默认 3]：${NC}"
+    echo -ne "${BOLD}请选择 GeoIP 模式 [1-3，默认 1]：${NC}"
 
     local choice=""
     read -r choice || true
-    case "${choice:-3}" in
+    case "${choice:-1}" in
         1)
             GEO_MODE="blacklist"
             COUNTRIES=$(prompt_input "请输入国家代码列表" "CN")
@@ -810,9 +810,9 @@ configure_geo_mode_menu() {
             COUNTRIES=""
             ;;
         *)
-            warn "选择无效，默认使用所有来源。"
-            GEO_MODE="none"
-            COUNTRIES=""
+            warn "选择无效，默认只阻断中国来源。"
+            GEO_MODE="blacklist"
+            COUNTRIES="CN"
             ;;
     esac
 }
@@ -881,7 +881,7 @@ main_menu() {
         clear 2>/dev/null || true
         echo -e "${BOLD}Incudal RFW 测试部署菜单${NC} ${DIM}v${SCRIPT_VERSION}${NC}"
         divider
-        echo -e "  ${CYAN}1)${NC} 快速强力部署 ${DIM}(所有节点阻断规则，默认所有来源生效)${NC}"
+        echo -e "  ${CYAN}1)${NC} 快速强力部署 ${DIM}(所有节点阻断规则，默认只阻断中国来源 CN)${NC}"
         echo -e "  ${CYAN}2)${NC} 选择规则模板部署"
         echo -e "  ${CYAN}3)${NC} 自定义选择阻断规则部署"
         echo -e "  ${CYAN}4)${NC} 手动输入完整 RFW 参数部署"
@@ -902,7 +902,8 @@ main_menu() {
             1)
                 reset_install_options
                 RULE_PROFILE="strong"
-                GEO_MODE="none"
+                GEO_MODE="blacklist"
+                COUNTRIES="CN"
                 LOG_PORT_ACCESS="true"
                 choose_iface
                 configure_advanced_menu
